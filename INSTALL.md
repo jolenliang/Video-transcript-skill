@@ -64,9 +64,16 @@ bash <skills目录>/video-transcript/scripts/setup-keys.sh
 
 用户看到 `✅ 已写入` 后继续。
 
-## Step 5：确认 Chrome 登录抖音
+## Step 5：Chrome 登录抖音 + 导出 cookie（一次性）
 
-提醒用户：在 Chrome 打开 https://www.douyin.com 并扫码登录（yt-dlp 需要读取 cookie 才能解析链接，数月过期一次，过期重登即可）。
+1. 提醒用户：在 Chrome 打开 https://www.douyin.com 并扫码登录
+2. 让用户在【自己的终端】运行（**不能由 Agent 代跑**：Agent 沙箱会拦截钥匙串写入，导致导出不完整、弹窗永远不停）：
+
+```bash
+bash <skills目录>/video-transcript/scripts/setup-cookies.sh
+```
+
+导出过程中若弹钥匙串密码框（Chrome Safe Storage，可能弹多次），逐个点「始终允许」。这一步把 Chrome cookie 导出为 `~/.config/video-transcript/cookies.txt`（600 权限），之后每次提取直接用该文件，**不再弹窗**。数月后 cookie 过期时重跑此脚本即可。
 
 ## Step 6：冒烟测试
 
@@ -78,8 +85,6 @@ bash <skills目录>/video-transcript/scripts/setup-keys.sh
   --url "<用户提供的链接>"
 ```
 
-**首次运行时 macOS 会弹出钥匙串密码框**（"python 想要使用 Chrome Safe Storage"）——这是 yt-dlp 解密 Chrome cookie 的正常环节，密码只输给系统、不经过任何第三方。提前告知用户，并建议点「**始终允许**」（点"允许"则每次运行都会再问一遍；换了 python 环境也会重新问一次）。
-
 成功标准：生成 Markdown 文件到用户选定的目录，输出摘要/要点/标签。
 
 若失败，按 SKILL.md 的「故障处理」顺序排查。
@@ -90,4 +95,5 @@ bash <skills目录>/video-transcript/scripts/setup-keys.sh
 
 - 笔记位置：Step 3 选定的目录
 - Key 位置：`~/.config/video-transcript/.env`（本机 600 权限，可随时重跑 setup-keys.sh 更换）
+- Cookie 位置：`~/.config/video-transcript/cookies.txt`（数月过期一次，过期重跑 setup-cookies.sh）
 - 解析失败兜底：抖音 App 保存视频 → 直接拖给 Agent

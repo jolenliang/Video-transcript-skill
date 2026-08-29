@@ -16,6 +16,7 @@ description: 提取抖音视频口播文案并沉淀为 Obsidian Markdown 笔记
 1. `~/.config/video-transcript/.env` 存在（API Keys）
 2. `~/.config/video-transcript/config.json` 存在（笔记目录）
 3. `SKILL_DIR/.venv/bin/python` 存在（依赖环境）
+4. `~/.config/video-transcript/cookies.txt` 存在（cookie 文件，仅 --url 分支需要）
 
 ## 执行
 
@@ -37,12 +38,13 @@ SKILL_DIR/.venv/bin/python SKILL_DIR/scripts/extract.py --file "<视频文件绝
 
 1. **缺 .env** → 让用户在【自己的终端】运行 `bash SKILL_DIR/scripts/setup-keys.sh`（Key 输入不回显，不要让用户在对话里粘贴 Key）
 2. **缺 config.json 或 .venv** → 运行 `bash SKILL_DIR/scripts/setup.sh` 并按其输出引导
-3. **yt-dlp 解析失败（403/空数据/cookie 错误）** → 提示用户在 Chrome 重新登录 douyin.com 后重试
-4. **报 "Fresh cookies needed" 但 cookie 实际有效** → 这是 TLS 指纹被抖音拦截的典型症状，检查 `.venv` 里是否装了 `curl_cffi`（没有则 `SKILL_DIR/.venv/bin/pip install "curl_cffi>=0.15"`）
-5. 仍失败 → 升级 yt-dlp：`SKILL_DIR/.venv/bin/pip install -U yt-dlp`
-6. 仍失败 → 引导用户走分支 B：抖音 App「保存本地」，把视频文件提供给 Agent
-7. **ASR 报错** → 检查硅基流动控制台额度与模型状态；503 等临时错误直接重试一次
-8. **macOS 反复弹钥匙串密码框（Chrome Safe Storage）** → 正常环节（yt-dlp 解密 Chrome cookie 所需），指导用户点「始终允许」；若每次运行都弹，说明上次点的是"允许"。密码只给系统，不经过第三方
+3. **缺 cookies.txt 或报 cookie 相关错误** → 让用户在【自己的终端】运行 `bash SKILL_DIR/scripts/setup-cookies.sh`（必须由用户终端执行：Agent 沙箱会拦截钥匙串写入，自动导出只会得到不完整的 cookie）。导出时若弹钥匙串密码框（可能弹多次），逐个点「始终允许」
+4. **报 "Fresh cookies needed" 但 cookie 刚导出** → 这是 TLS 指纹被抖音拦截的典型症状，检查 `.venv` 里是否装了 `curl_cffi`（没有则 `SKILL_DIR/.venv/bin/pip install "curl_cffi>=0.15"`）
+5. 仍失败 → Chrome 重新登录 douyin.com，然后重跑 setup-cookies.sh
+6. 仍失败 → 升级 yt-dlp：`SKILL_DIR/.venv/bin/pip install -U yt-dlp`
+7. 仍失败 → 引导用户走分支 B：抖音 App「保存本地」，把视频文件提供给 Agent
+8. **ASR 报错** → 检查硅基流动控制台额度与模型状态；503 等临时错误直接重试一次
+9. **macOS 反复弹钥匙串密码框（Chrome Safe Storage）** → 说明 cookies.txt 缺失或失效，走第 3 步导出一次即可根治；不要试图靠点「Always Allow」解决（Agent 沙箱会拦截授权写入，且 Chrome 更新会重写该钥匙串项）
 
 ## 边界
 

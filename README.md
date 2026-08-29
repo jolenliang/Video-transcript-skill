@@ -13,7 +13,7 @@ Agent 会自动完成克隆、环境搭建、Obsidian 目录检测。你只需�
 1. **录入两个 API Key**（Agent 会引导你在自己终端输入，不回显、不经过对话）：
    - 硅基流动 [siliconflow.cn](https://siliconflow.cn)（免费，语音转文字）
    - DeepSeek [platform.deepseek.com](https://platform.deepseek.com)（摘要加工，每条约 1 分钱）
-2. **Chrome 登录一次 [douyin.com](https://www.douyin.com)**（扫码即可，用于链接解析）
+2. **Chrome 登录一次 [douyin.com](https://www.douyin.com) + 导出一次 cookie**（Agent 会引导你在终端运行 `setup-cookies.sh`，一次性导出后日常运行不再弹钥匙串窗口；数月过期一次，过期重跑即可）
 
 装完后，粘贴任何抖音链接说「提取文案」即可。解析失败时的兜底：抖音 App 保存视频 → 直接拖给 Agent。
 

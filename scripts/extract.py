@@ -78,12 +78,21 @@ def slugify(s, maxlen=30):
     return s[:maxlen] or "未命名"
 
 
+COOKIE_FILE = CONFIG_DIR / "cookies.txt"
+SETUP_COOKIES = Path(__file__).parent / "setup-cookies.sh"
+
+
 def download_audio(url, workdir, ffmpeg):
-    """yt-dlp + Chrome cookie 下载音频，返回 (音频路径, 元信息dict)"""
+    """yt-dlp + 导出的 cookie 文件下载音频，返回 (音频路径, 元信息dict)。
+    cookie 文件由用户在终端运行 setup-cookies.sh 一次性导出（Agent 沙箱无法写钥匙串，
+    自动导出会得到不完整的 cookie），过期时同样引导用户重跑该脚本。"""
     out_tpl = str(workdir / "%(id)s.%(ext)s")
+    if not COOKIE_FILE.exists():
+        sys.exit(f"❌ 缺少 cookie 文件。请在你自己的终端运行一次（今后不再弹钥匙串窗口）:\n"
+                 f"  bash {SETUP_COOKIES}")
     cmd = [
         sys.executable, "-m", "yt_dlp",
-        "--cookies-from-browser", "chrome",
+        "--cookies", str(COOKIE_FILE),
         "-x", "--audio-format", "mp3",
         "--ffmpeg-location", ffmpeg,
         "--write-info-json", "--no-playlist",
@@ -92,8 +101,10 @@ def download_audio(url, workdir, ffmpeg):
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if p.returncode != 0:
         sys.exit("❌ yt-dlp 解析失败（可能是 cookie 过期或反爬升级）。\n"
-                 "对策：1) Chrome 重新登录 douyin.com；2) 升级 yt-dlp: pip install -U yt-dlp；"
-                 "3) 抖音 App 保存视频后改用 --file 兜底。\n"
+                 "对策：\n"
+                 f"  1) 在终端重跑 cookie 导出: bash {SETUP_COOKIES}\n"
+                 "  2) 仍失败则 Chrome 重新登录 douyin.com 后再跑一遍上面的命令\n"
+                 "  3) 升级 yt-dlp: pip install -U yt-dlp；4) 抖音 App 保存视频后改用 --file 兜底。\n"
                  f"错误详情:\n{p.stderr[-800:]}")
     meta = {}
     infos = list(workdir.glob("*.info.json"))
