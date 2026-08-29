@@ -1,7 +1,7 @@
 # INSTALL.md — 给 AI Agent 的安装 SOP
 
 > 这份文档是写给 AI Agent 执行的安装流程，不是给人读的教程。
-> Agent 收到类似「帮我安装这个 skill：https://github.com/Jolen/Video-transcript-skill」的请求时，按以下步骤执行。
+> Agent 收到类似「帮我安装这个 skill：https://github.com/jolenliang/Video-transcript-skill」的请求时，按以下步骤执行。
 > 全程只需用户做 2 件手动事：① 在自己终端录入 API Key；② 确认 Chrome 已登录 douyin.com。
 
 ## 系统要求（先检查）
@@ -23,7 +23,7 @@
 
 ```bash
 mkdir -p <skills目录>
-git clone https://github.com/Jolen/Video-transcript-skill.git <skills目录>/video-transcript
+git clone https://github.com/jolenliang/Video-transcript-skill.git <skills目录>/video-transcript
 ```
 
 若目标目录已存在 `video-transcript`，改为 `cd` 进去 `git pull` 更新。

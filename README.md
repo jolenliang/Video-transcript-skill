@@ -6,7 +6,7 @@
 
 ## 一键安装（复制这句话发给你的 AI Agent）
 
-> **帮我安装这个 skill 并配置好：https://github.com/Jolen/Video-transcript-skill**
+> **帮我安装这个 skill 并配置好：https://github.com/jolenliang/Video-transcript-skill**
 
 Agent 会自动完成克隆、环境搭建、Obsidian 目录检测。你只需要：
 
