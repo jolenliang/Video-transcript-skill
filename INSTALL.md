@@ -13,13 +13,14 @@
 
 ## Step 1：克隆到 Agent 对应的 skills 目录
 
-按当前 Agent 类型选择目标目录（以下任一，存在哪个用哪个；都不存在则用 WorkBuddy 路径并创建）：
+按当前 Agent 类型选择目标目录（按用户实际使用的 Agent 判断；判断不了就用默认路径 `~/.agents/skills/`）：
 
 | Agent | 安装目录 |
 |---|---|
 | WorkBuddy | `~/.workbuddy/skills/` |
 | Claude Code | `~/.claude/skills/` |
-| 其他/不确定 | `~/.workbuddy/skills/` |
+| Codex | `~/.agents/skills/` |
+| 其他/不确定 | `~/.agents/skills/`（默认） |
 
 ```bash
 mkdir -p <skills目录>
