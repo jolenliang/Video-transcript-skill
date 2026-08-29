@@ -161,7 +161,7 @@ def extract_audio_from_file(video, workdir, ffmpeg):
     return out, {"title": Path(video).stem, "author": "", "url": "", "duration": 0}
 
 
-def asr(audio_path, key, attempts=3):
+def asr(audio_path, key, attempts=5):
     """ASR 转写。硅基流动部分后端节点不稳定，5xx 属常见临时错误，做有限次退避重试"""
     for i in range(attempts):
         try:
@@ -178,8 +178,8 @@ def asr(audio_path, key, attempts=3):
             return text
         except SystemExit as e:
             if "HTTP 5" in str(e) and i < attempts - 1:
-                print(f"⏳ ASR 服务端临时错误（5xx），8 秒后重试（{i+1}/{attempts-1}）...", flush=True)
-                time.sleep(8)
+                print(f"⏳ ASR 服务端临时错误（5xx），5 秒后重试（{i+1}/{attempts-1}）...", flush=True)
+                time.sleep(5)
                 continue
             raise
 
@@ -187,21 +187,26 @@ def asr(audio_path, key, attempts=3):
 def deepseek_polish(transcript, meta, key):
     prompt = (
         "你是知识管理助手。以下是一段抖音视频的口播逐字稿，请输出 JSON（不要 markdown 代码块）：\n"
-        '{"summary": "80字内摘要", "points": ["要点1","要点2","要点3"], "tags": ["标签1","标签2","标签3"]}\n'
-        "要求：要点提炼 3-7 条，每条一句话；标签 3-5 个，短词；忠实原文，不虚构。\n\n"
-        f"视频标题：{meta.get('title','')}\n逐字稿：\n{transcript[:8000]}"
+        '{"summary": "80字内摘要", "points": ["要点1","要点2","要点3"], "tags": ["标签1","标签2","标签3"], "formatted": "分段排版后的逐字稿全文"}\n'
+        "要求：\n"
+        "- 要点提炼 3-7 条，每条一句话；标签 3-5 个，短词；忠实原文，不虚构\n"
+        "- formatted 字段：把逐字稿按语义自然分段（话题/意思转换处分段，每段 1-4 句话，段间空一行），"
+        "修正明显错误的断句和标点；严禁改写、润色、删减或增补任何内容；"
+        "人名、品牌、术语即使 ASR 识别有误也保持原样；英文句子保留原样\n\n"
+        f"视频标题：{meta.get('title','')}\n逐字稿：\n{transcript[:20000]}"
     )
     resp = http_post(
         DS_API,
         headers={"Authorization": f"Bearer {key}"},
         json_body={"model": DS_MODEL, "messages": [{"role": "user", "content": prompt}],
                    "response_format": {"type": "json_object"}, "temperature": 0.3},
+        timeout=600,
     )
     content = resp["choices"][0]["message"]["content"]
     try:
         return json.loads(content)
     except json.JSONDecodeError:
-        return {"summary": content[:100], "points": [], "tags": []}
+        return {"summary": content[:100], "points": [], "tags": [], "formatted": ""}
 
 
 def write_markdown(vault_dir, meta, transcript, polish):
@@ -228,7 +233,8 @@ def write_markdown(vault_dir, meta, transcript, polish):
         "## 要点",
     ]
     lines += [f"- {p}" for p in polish.get("points", [])]
-    lines += ["", "## 原文", transcript, ""]
+    # 原文优先使用 DeepSeek 分段排版版（保真，仅分段/修标点）；缺失时回退 ASR 原始文本
+    lines += ["", "## 原文", polish.get("formatted") or transcript, ""]
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
 
