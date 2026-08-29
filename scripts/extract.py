@@ -6,7 +6,7 @@
 流程: 下载音频 -> SenseVoice ASR -> DeepSeek 摘要/要点/标签 -> Markdown 入 Obsidian
 配置: ~/.config/video-transcript/.env (API Keys) + config.json (vault_dir)
 """
-import argparse, json, os, re, subprocess, sys, tempfile, unicodedata
+import argparse, hashlib, json, os, re, subprocess, sys, tempfile, time, unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -82,14 +82,27 @@ COOKIE_FILE = CONFIG_DIR / "cookies.txt"
 SETUP_COOKIES = Path(__file__).parent / "setup-cookies.sh"
 
 
+CACHE_DIR = CONFIG_DIR / "cache"
+RETRY_WAIT = 30  # 下载失败后重试间隔（秒），避免触发抖音风控
+
+
 def download_audio(url, workdir, ffmpeg):
     """yt-dlp + 导出的 cookie 文件下载音频，返回 (音频路径, 元信息dict)。
     cookie 文件由用户在终端运行 setup-cookies.sh 一次性导出（Agent 沙箱无法写钥匙串，
-    自动导出会得到不完整的 cookie），过期时同样引导用户重跑该脚本。"""
+    自动导出会得到不完整的 cookie），过期时同样引导用户重跑该脚本。
+    反爬纪律：1) 下载成功的音频按链接缓存，ASR 等后续环节失败重跑时不再请求抖音；
+    2) 下载失败最多自动重试 1 次，且先等待 RETRY_WAIT 秒；仍失败即退出，不连续重试。"""
     out_tpl = str(workdir / "%(id)s.%(ext)s")
     if not COOKIE_FILE.exists():
         sys.exit(f"❌ 缺少 cookie 文件。请在你自己的终端运行一次（今后不再弹钥匙串窗口）:\n"
                  f"  bash {SETUP_COOKIES}")
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    key = hashlib.md5(url.encode()).hexdigest()[:12]
+    cached_audio = CACHE_DIR / f"{key}.mp3"
+    cached_meta = CACHE_DIR / f"{key}.json"
+    if cached_audio.exists() and cached_meta.exists():
+        print("♻️ 命中音频缓存，跳过下载（避免触发抖音风控）...", flush=True)
+        return cached_audio, json.loads(cached_meta.read_text())
     cmd = [
         sys.executable, "-m", "yt_dlp",
         "--cookies", str(COOKIE_FILE),
@@ -100,11 +113,16 @@ def download_audio(url, workdir, ffmpeg):
     ]
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if p.returncode != 0:
-        sys.exit("❌ yt-dlp 解析失败（可能是 cookie 过期或反爬升级）。\n"
+        print(f"⏳ 下载失败，等待 {RETRY_WAIT} 秒（避免触发风控）后重试最后一次...", flush=True)
+        time.sleep(RETRY_WAIT)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if p.returncode != 0:
+        sys.exit("❌ yt-dlp 解析失败（已按反爬纪律重试 1 次仍失败）。\n"
                  "对策：\n"
-                 f"  1) 在终端重跑 cookie 导出: bash {SETUP_COOKIES}\n"
-                 "  2) 仍失败则 Chrome 重新登录 douyin.com 后再跑一遍上面的命令\n"
-                 "  3) 升级 yt-dlp: pip install -U yt-dlp；4) 抖音 App 保存视频后改用 --file 兜底。\n"
+                 "  1) 至少间隔几分钟后再试（短时间连续请求会被抖音临时风控）\n"
+                 f"  2) 在终端重跑 cookie 导出: bash {SETUP_COOKIES}\n"
+                 "  3) 仍失败则 Chrome 重新登录 douyin.com 后再跑一遍上面的命令\n"
+                 "  4) 升级 yt-dlp: pip install -U yt-dlp；5) 抖音 App 保存视频后改用 --file 兜底。\n"
                  f"错误详情:\n{p.stderr[-800:]}")
     meta = {}
     infos = list(workdir.glob("*.info.json"))
@@ -117,7 +135,10 @@ def download_audio(url, workdir, ffmpeg):
     audios = list(workdir.glob("*.mp3"))
     if not audios:
         sys.exit("❌ 未找到下载后的音频文件")
-    return audios[0], meta
+    # 写入缓存：后续环节（ASR/DeepSeek）失败重跑时直接复用，不再请求抖音
+    audios[0].replace(cached_audio)
+    cached_meta.write_text(json.dumps(meta, ensure_ascii=False))
+    return cached_audio, meta
 
 
 def extract_audio_from_file(video, workdir, ffmpeg):
