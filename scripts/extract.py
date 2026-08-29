@@ -86,6 +86,21 @@ CACHE_DIR = CONFIG_DIR / "cache"
 RETRY_WAIT = 30  # 下载失败后重试间隔（秒），避免触发抖音风控
 
 
+def _cache_paths(url):
+    key = hashlib.md5(url.encode()).hexdigest()[:12]
+    return CACHE_DIR / f"{key}.mp3", CACHE_DIR / f"{key}.json"
+
+
+def clear_cache(url):
+    """全流程成功后调用：清理该链接的音频缓存（失败时保留供重试）"""
+    try:
+        for p in _cache_paths(url):
+            p.unlink(missing_ok=True)
+        print("🧹 已清理本次音频缓存", flush=True)
+    except Exception:
+        pass
+
+
 def download_audio(url, workdir, ffmpeg):
     """yt-dlp + 导出的 cookie 文件下载音频，返回 (音频路径, 元信息dict)。
     cookie 文件由用户在终端运行 setup-cookies.sh 一次性导出（Agent 沙箱无法写钥匙串，
@@ -97,9 +112,7 @@ def download_audio(url, workdir, ffmpeg):
         sys.exit(f"❌ 缺少 cookie 文件。请在你自己的终端运行一次（今后不再弹钥匙串窗口）:\n"
                  f"  bash {SETUP_COOKIES}")
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    key = hashlib.md5(url.encode()).hexdigest()[:12]
-    cached_audio = CACHE_DIR / f"{key}.mp3"
-    cached_meta = CACHE_DIR / f"{key}.json"
+    cached_audio, cached_meta = _cache_paths(url)
     if cached_audio.exists() and cached_meta.exists():
         print("♻️ 命中音频缓存，跳过下载（避免触发抖音风控）...", flush=True)
         return cached_audio, json.loads(cached_meta.read_text())
@@ -237,6 +250,8 @@ def main():
         print("🧠 DeepSeek 生成摘要/要点/标签...", flush=True)
         polish = deepseek_polish(transcript, meta, env["DEEPSEEK_API_KEY"])
         path = write_markdown(vault_dir, meta, transcript, polish)
+        if args.url:
+            clear_cache(url)  # 全流程成功才清理；任何环节失败则保留缓存供重试
         print("\n✅ 完成")
         print(f"📄 {path}")
         print(f"\n【摘要】{polish.get('summary','')}")
