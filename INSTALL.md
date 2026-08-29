@@ -78,6 +78,8 @@ bash <skills目录>/video-transcript/scripts/setup-keys.sh
   --url "<用户提供的链接>"
 ```
 
+**首次运行时 macOS 会弹出钥匙串密码框**（"python 想要使用 Chrome Safe Storage"）——这是 yt-dlp 解密 Chrome cookie 的正常环节，密码只输给系统、不经过任何第三方。提前告知用户，并建议点「**始终允许**」（点"允许"则每次运行都会再问一遍；换了 python 环境也会重新问一次）。
+
 成功标准：生成 Markdown 文件到用户选定的目录，输出摘要/要点/标签。
 
 若失败，按 SKILL.md 的「故障处理」顺序排查。

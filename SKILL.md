@@ -42,6 +42,7 @@ SKILL_DIR/.venv/bin/python SKILL_DIR/scripts/extract.py --file "<视频文件绝
 5. 仍失败 → 升级 yt-dlp：`SKILL_DIR/.venv/bin/pip install -U yt-dlp`
 6. 仍失败 → 引导用户走分支 B：抖音 App「保存本地」，把视频文件提供给 Agent
 7. **ASR 报错** → 检查硅基流动控制台额度与模型状态；503 等临时错误直接重试一次
+8. **macOS 反复弹钥匙串密码框（Chrome Safe Storage）** → 正常环节（yt-dlp 解密 Chrome cookie 所需），指导用户点「始终允许」；若每次运行都弹，说明上次点的是"允许"。密码只给系统，不经过第三方
 
 ## 边界
 
