@@ -19,12 +19,20 @@ echo "过程中若弹出钥匙串密码框（Chrome Safe Storage），请输入�
 echo "（弹窗可能出现多次，属正常现象，逐个点「始终允许」即可）"
 echo ""
 
-"$VENV_PY" -m yt_dlp \
+# yt-dlp 的抖音解析器不认首页，必须用具体视频页触发 cookie 导出；可用参数覆盖
+EXPORT_URL="${1:-https://www.douyin.com/video/7670918074329025792}"
+
+if ! "$VENV_PY" -m yt_dlp \
   --cookies-from-browser chrome \
   --cookies "$OUT" \
   --ffmpeg-location "$FFMPEG" \
   --simulate --no-playlist \
-  "https://www.douyin.com/"
+  "$EXPORT_URL"; then
+  echo ""
+  echo "❌ 导出失败。默认视频页可能已失效，可传入任意一条抖音视频链接重试："
+  echo "  bash $0 \"https://www.douyin.com/video/xxxx\""
+  exit 1
+fi
 
 chmod 600 "$OUT"
 echo ""
