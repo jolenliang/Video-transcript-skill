@@ -43,7 +43,7 @@ SKILL_DIR/.venv/bin/python SKILL_DIR/scripts/extract.py --file "<视频文件绝
 5. 仍失败 → Chrome 重新登录 douyin.com，然后重跑 setup-cookies.sh
 6. 仍失败 → 升级 yt-dlp：`SKILL_DIR/.venv/bin/pip install -U yt-dlp`
 7. 仍失败 → 引导用户走分支 B：抖音 App「保存本地」，把视频文件提供给 Agent
-8. **ASR 报错** → 检查硅基流动控制台额度与模型状态；503 等临时错误直接重试一次
+8. **ASR 报错** → 5xx 临时错误脚本已自动退避重试（8 秒 × 2 次，硅基流动部分节点不稳定属常态）；持续失败再检查硅基流动控制台额度与模型状态
 9. **macOS 反复弹钥匙串密码框（Chrome Safe Storage）** → 说明 cookies.txt 缺失或失效，走第 3 步导出一次即可根治；不要试图靠点「Always Allow」解决（Agent 沙箱会拦截授权写入，且 Chrome 更新会重写该钥匙串项）
 
 ## 边界

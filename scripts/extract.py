@@ -161,18 +161,27 @@ def extract_audio_from_file(video, workdir, ffmpeg):
     return out, {"title": Path(video).stem, "author": "", "url": "", "duration": 0}
 
 
-def asr(audio_path, key):
-    resp = http_post(
-        SF_API,
-        headers={"Authorization": f"Bearer {key}"},
-        data={"model": SF_MODEL},
-        files={"file": (audio_path.name, audio_path.read_bytes(), "audio/mpeg")},
-        timeout=600,
-    )
-    text = (resp.get("text") or "").strip()
-    if not text:
-        sys.exit(f"❌ ASR 返回空: {json.dumps(resp, ensure_ascii=False)[:300]}")
-    return text
+def asr(audio_path, key, attempts=3):
+    """ASR 转写。硅基流动部分后端节点不稳定，5xx 属常见临时错误，做有限次退避重试"""
+    for i in range(attempts):
+        try:
+            resp = http_post(
+                SF_API,
+                headers={"Authorization": f"Bearer {key}"},
+                data={"model": SF_MODEL},
+                files={"file": (audio_path.name, audio_path.read_bytes(), "audio/mpeg")},
+                timeout=600,
+            )
+            text = (resp.get("text") or "").strip()
+            if not text:
+                sys.exit(f"❌ ASR 返回空: {json.dumps(resp, ensure_ascii=False)[:300]}")
+            return text
+        except SystemExit as e:
+            if "HTTP 5" in str(e) and i < attempts - 1:
+                print(f"⏳ ASR 服务端临时错误（5xx），8 秒后重试（{i+1}/{attempts-1}）...", flush=True)
+                time.sleep(8)
+                continue
+            raise
 
 
 def deepseek_polish(transcript, meta, key):
