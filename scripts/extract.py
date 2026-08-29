@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""抖音视频文案提取主链路（分发版，无本机硬编码路径）
+用法:
+  python extract.py --url "https://v.douyin.com/xxxx"
+  python extract.py --file /path/to/video.mp4   # 兜底分支：手动传文件
+流程: 下载音频 -> SenseVoice ASR -> DeepSeek 摘要/要点/标签 -> Markdown 入 Obsidian
+配置: ~/.config/video-transcript/.env (API Keys) + config.json (vault_dir)
+"""
+import argparse, json, os, re, subprocess, sys, tempfile, unicodedata
+from datetime import datetime
+from pathlib import Path
+
+CONFIG_DIR = Path.home() / ".config/video-transcript"
+ENV_FILE = CONFIG_DIR / ".env"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+
+SF_API = "https://api.siliconflow.cn/v1/audio/transcriptions"
+SF_MODEL = "FunAudioLLM/SenseVoiceSmall"
+DS_API = "https://api.deepseek.com/chat/completions"
+DS_MODEL = "deepseek-chat"
+
+
+def get_ffmpeg():
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError:
+        sys.exit("❌ 未安装 imageio-ffmpeg，请先运行 scripts/setup.sh")
+
+
+def load_config():
+    if not ENV_FILE.exists():
+        sys.exit(f"❌ 未找到 {ENV_FILE}\n请先在终端运行: bash scripts/setup-keys.sh")
+    env = {}
+    for line in ENV_FILE.read_text().splitlines():
+        if "=" in line and not line.startswith("#"):
+            k, v = line.split("=", 1)
+            env[k.strip()] = v.strip()
+    for k in ("SILICONFLOW_API_KEY", "DEEPSEEK_API_KEY"):
+        if not env.get(k):
+            sys.exit(f"❌ {ENV_FILE} 缺少 {k}，请重新运行 scripts/setup-keys.sh")
+    if not CONFIG_FILE.exists():
+        sys.exit(f"❌ 未找到 {CONFIG_FILE}（Obsidian 目录配置），请先运行 scripts/setup.sh")
+    cfg = json.loads(CONFIG_FILE.read_text())
+    vault_dir = Path(os.path.expanduser(cfg.get("vault_dir", "")))
+    if not vault_dir:
+        sys.exit(f"❌ {CONFIG_FILE} 中 vault_dir 为空，请重新运行 scripts/setup.sh")
+    return env, vault_dir
+
+
+def http_post(url, headers, data=None, files=None, json_body=None, timeout=300):
+    """用 urllib 发请求，零第三方依赖"""
+    import urllib.request, urllib.error
+    req = urllib.request.Request(url, headers=headers)
+    if json_body is not None:
+        req.data = json.dumps(json_body).encode()
+        req.add_header("Content-Type", "application/json")
+    elif files is not None:
+        boundary = "----pyboundary" + os.urandom(8).hex()
+        body = b""
+        for k, v in (data or {}).items():
+            body += f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+        for k, (fname, fdata, ctype) in files.items():
+            body += f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"; filename="{fname}"\r\nContent-Type: {ctype}\r\n\r\n'.encode() + fdata + b"\r\n"
+        body += f"--{boundary}--\r\n".encode()
+        req.data = body
+        req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        sys.exit(f"❌ HTTP {e.code}: {e.read()[:500].decode(errors='replace')}")
+
+
+def slugify(s, maxlen=30):
+    s = unicodedata.normalize("NFKC", s)
+    s = re.sub(r'[\\/:*?"<>|\n\r\t]', "", s).strip()
+    return s[:maxlen] or "未命名"
+
+
+def download_audio(url, workdir, ffmpeg):
+    """yt-dlp + Chrome cookie 下载音频，返回 (音频路径, 元信息dict)"""
+    out_tpl = str(workdir / "%(id)s.%(ext)s")
+    cmd = [
+        sys.executable, "-m", "yt_dlp",
+        "--cookies-from-browser", "chrome",
+        "-x", "--audio-format", "mp3",
+        "--ffmpeg-location", ffmpeg,
+        "--write-info-json", "--no-playlist",
+        "-o", out_tpl, url,
+    ]
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if p.returncode != 0:
+        sys.exit("❌ yt-dlp 解析失败（可能是 cookie 过期或反爬升级）。\n"
+                 "对策：1) Chrome 重新登录 douyin.com；2) 升级 yt-dlp: pip install -U yt-dlp；"
+                 "3) 抖音 App 保存视频后改用 --file 兜底。\n"
+                 f"错误详情:\n{p.stderr[-800:]}")
+    meta = {}
+    infos = list(workdir.glob("*.info.json"))
+    if infos:
+        d = json.loads(infos[0].read_text())
+        raw_title = (d.get("title") or "").split("\n")[0].strip()
+        meta = {"title": raw_title[:60],
+                "author": d.get("uploader") or d.get("creator") or d.get("channel") or "",
+                "url": d.get("webpage_url", url), "duration": d.get("duration", 0)}
+    audios = list(workdir.glob("*.mp3"))
+    if not audios:
+        sys.exit("❌ 未找到下载后的音频文件")
+    return audios[0], meta
+
+
+def extract_audio_from_file(video, workdir, ffmpeg):
+    out = workdir / (Path(video).stem + ".mp3")
+    subprocess.run([ffmpeg, "-y", "-i", str(video), "-vn", "-acodec", "libmp3lame", "-q:a", "4", str(out)],
+                   capture_output=True, timeout=300, check=True)
+    return out, {"title": Path(video).stem, "author": "", "url": "", "duration": 0}
+
+
+def asr(audio_path, key):
+    resp = http_post(
+        SF_API,
+        headers={"Authorization": f"Bearer {key}"},
+        data={"model": SF_MODEL},
+        files={"file": (audio_path.name, audio_path.read_bytes(), "audio/mpeg")},
+        timeout=600,
+    )
+    text = (resp.get("text") or "").strip()
+    if not text:
+        sys.exit(f"❌ ASR 返回空: {json.dumps(resp, ensure_ascii=False)[:300]}")
+    return text
+
+
+def deepseek_polish(transcript, meta, key):
+    prompt = (
+        "你是知识管理助手。以下是一段抖音视频的口播逐字稿，请输出 JSON（不要 markdown 代码块）：\n"
+        '{"summary": "80字内摘要", "points": ["要点1","要点2","要点3"], "tags": ["标签1","标签2","标签3"]}\n'
+        "要求：要点提炼 3-7 条，每条一句话；标签 3-5 个，短词；忠实原文，不虚构。\n\n"
+        f"视频标题：{meta.get('title','')}\n逐字稿：\n{transcript[:8000]}"
+    )
+    resp = http_post(
+        DS_API,
+        headers={"Authorization": f"Bearer {key}"},
+        json_body={"model": DS_MODEL, "messages": [{"role": "user", "content": prompt}],
+                   "response_format": {"type": "json_object"}, "temperature": 0.3},
+    )
+    content = resp["choices"][0]["message"]["content"]
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return {"summary": content[:100], "points": [], "tags": []}
+
+
+def write_markdown(vault_dir, meta, transcript, polish):
+    vault_dir.mkdir(parents=True, exist_ok=True)
+    date = datetime.now().strftime("%Y-%m-%d")
+    fname = f"{date}-{slugify(meta.get('title') or '抖音视频')}.md"
+    path = vault_dir / fname
+    dur = meta.get("duration") or 0
+    dur_str = f"{dur//60}:{dur%60:02d}" if dur else "未知"
+    tags = polish.get("tags", [])
+    lines = [
+        "---",
+        f'title: "{(meta.get("title") or "").replace(chr(34), "")}"',
+        f'author: "{meta.get("author","")}"',
+        f'source: "{meta.get("url","")}"',
+        f"extracted: {date}",
+        f"duration: \"{dur_str}\"",
+        "tags: [" + ", ".join(tags) + "]",
+        "---",
+        "",
+        "## 摘要",
+        polish.get("summary", ""),
+        "",
+        "## 要点",
+    ]
+    lines += [f"- {p}" for p in polish.get("points", [])]
+    lines += ["", "## 原文", transcript, ""]
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("--url")
+    g.add_argument("--file")
+    args = ap.parse_args()
+
+    env, vault_dir = load_config()
+    ffmpeg = get_ffmpeg()
+    with tempfile.TemporaryDirectory() as td:
+        workdir = Path(td)
+        if args.url:
+            url = args.url.strip()
+            m = re.search(r"https?://v\.douyin\.com/\S+", url) or re.search(r"https?://\S*douyin\.com/\S+", url)
+            if m:
+                url = m.group(0)
+            print("⏬ 解析并下载音频...", flush=True)
+            audio, meta = download_audio(url, workdir, ffmpeg)
+        else:
+            print("⏬ 从本地文件提取音频...", flush=True)
+            audio, meta = extract_audio_from_file(args.file, workdir, ffmpeg)
+        print(f"🎙 ASR 转写中（{audio.stat().st_size//1024}KB）...", flush=True)
+        transcript = asr(audio, env["SILICONFLOW_API_KEY"])
+        print("🧠 DeepSeek 生成摘要/要点/标签...", flush=True)
+        polish = deepseek_polish(transcript, meta, env["DEEPSEEK_API_KEY"])
+        path = write_markdown(vault_dir, meta, transcript, polish)
+        print("\n✅ 完成")
+        print(f"📄 {path}")
+        print(f"\n【摘要】{polish.get('summary','')}")
+        if polish.get("points"):
+            print("【要点】")
+            for p in polish["points"]:
+                print(f"  - {p}")
+        print(f"【标签】{', '.join(polish.get('tags', []))}")
+        print(f"\n【原文预览】{transcript[:200]}...")
+
+
+if __name__ == "__main__":
+    main()
