@@ -186,7 +186,7 @@ def asr(audio_path, key, attempts=5):
 
 def deepseek_polish(transcript, meta, key):
     prompt = (
-        "你是知识管理助手。以下是一段抖音视频的口播逐字稿，请输出 JSON（不要 markdown 代码块）：\n"
+        "你是知识管理助手。以下是一段视频口播逐字稿或社交媒体笔记正文，请输出 JSON（不要 markdown 代码块）：\n"
         '{"summary": "80字内摘要", "points": ["要点1","要点2","要点3"], "tags": ["标签1","标签2","标签3"], "formatted": "分段排版后的逐字稿全文"}\n'
         "要求：\n"
         "- 要点提炼 3-7 条，每条一句话；标签 3-5 个，短词；忠实原文，不虚构\n"
@@ -239,6 +239,47 @@ def write_markdown(vault_dir, meta, transcript, polish):
     return path
 
 
+def detect_platform(url):
+    if "xhslink.cn" in url or "xiaohongshu.com" in url:
+        return "xhs"
+    return "douyin"
+
+
+def notes_dir_for(vault_dir, platform):
+    """笔记按平台分目录：抖音用配置的目录（默认 I-抖音文案），小红书用同级 I-小红书文案"""
+    if platform == "xhs":
+        return vault_dir.parent / "I-小红书文案"
+    return vault_dir
+
+
+def fetch_xhs_metadata(url, ffmpeg):
+    """小红书笔记元数据（匿名即可，无需 cookie；有 cookie 文件则顺带使用）。
+    返回 (meta, has_video, 正文)。遵守反爬纪律：失败等 30 秒只重试 1 次。"""
+    cmd = [sys.executable, "-m", "yt_dlp", "-j", "--simulate", "--no-playlist",
+           "--ignore-no-formats-error", "--ffmpeg-location", ffmpeg]
+    if COOKIE_FILE.exists():
+        cmd += ["--cookies", str(COOKIE_FILE)]
+    cmd.append(url)
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if p.returncode != 0 or not p.stdout.strip():
+        print(f"⏳ 解析失败，等待 {RETRY_WAIT} 秒（避免触发风控）后重试最后一次...", flush=True)
+        time.sleep(RETRY_WAIT)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if p.returncode != 0 or not p.stdout.strip():
+        sys.exit("❌ 小红书链接解析失败（已按反爬纪律重试 1 次仍失败）。\n"
+                 "对策：\n"
+                 "  1) 至少间隔几分钟后再试（短时间连续请求会被风控）\n"
+                 "  2) 确认链接完整：从小红书 App 重新复制（需带 xsec_token 参数）\n"
+                 "  3) 升级 yt-dlp: pip install -U yt-dlp\n"
+                 f"错误详情:\n{p.stderr[-500:]}")
+    d = json.loads(p.stdout.strip().splitlines()[-1])
+    meta = {"title": (d.get("title") or "").split("\n")[0].strip()[:60],
+            "author": d.get("uploader") or d.get("creator") or d.get("channel") or "",
+            "url": d.get("webpage_url", url),
+            "duration": d.get("duration") or 0}
+    return meta, bool(d.get("formats")), (d.get("description") or "").strip()
+
+
 def main():
     ap = argparse.ArgumentParser()
     g = ap.add_mutually_exclusive_group(required=True)
@@ -250,21 +291,40 @@ def main():
     ffmpeg = get_ffmpeg()
     with tempfile.TemporaryDirectory() as td:
         workdir = Path(td)
+        platform = "douyin"
         if args.url:
             url = args.url.strip()
-            m = re.search(r"https?://v\.douyin\.com/\S+", url) or re.search(r"https?://\S*douyin\.com/\S+", url)
+            m = re.search(r"https?://\S*(?:douyin\.com|xhslink\.cn|xiaohongshu\.com)\S*", url)
             if m:
                 url = m.group(0)
-            print("⏬ 解析并下载音频...", flush=True)
-            audio, meta = download_audio(url, workdir, ffmpeg)
+            platform = detect_platform(url)
+            if platform == "xhs":
+                print("⏬ 解析小红书笔记...", flush=True)
+                meta, has_video, note_text = fetch_xhs_metadata(url, ffmpeg)
+                if has_video:
+                    print("🎬 视频笔记，下载音频...", flush=True)
+                    audio, vmeta = download_audio(url, workdir, ffmpeg)
+                    meta = {**meta, **{k: v for k, v in vmeta.items() if v}}
+                    print(f"🎙 ASR 转写中（{audio.stat().st_size//1024}KB）...", flush=True)
+                    transcript = asr(audio, env["SILICONFLOW_API_KEY"])
+                else:
+                    print("📝 图文笔记，提取正文...", flush=True)
+                    if not note_text:
+                        sys.exit("❌ 未提取到正文（笔记可能已删除或需要登录）")
+                    transcript = note_text
+            else:
+                print("⏬ 解析并下载音频...", flush=True)
+                audio, meta = download_audio(url, workdir, ffmpeg)
+                print(f"🎙 ASR 转写中（{audio.stat().st_size//1024}KB）...", flush=True)
+                transcript = asr(audio, env["SILICONFLOW_API_KEY"])
         else:
             print("⏬ 从本地文件提取音频...", flush=True)
             audio, meta = extract_audio_from_file(args.file, workdir, ffmpeg)
-        print(f"🎙 ASR 转写中（{audio.stat().st_size//1024}KB）...", flush=True)
-        transcript = asr(audio, env["SILICONFLOW_API_KEY"])
+            print(f"🎙 ASR 转写中（{audio.stat().st_size//1024}KB）...", flush=True)
+            transcript = asr(audio, env["SILICONFLOW_API_KEY"])
         print("🧠 DeepSeek 生成摘要/要点/标签...", flush=True)
         polish = deepseek_polish(transcript, meta, env["DEEPSEEK_API_KEY"])
-        path = write_markdown(vault_dir, meta, transcript, polish)
+        path = write_markdown(notes_dir_for(vault_dir, platform), meta, transcript, polish)
         if args.url:
             clear_cache(url)  # 全流程成功才清理；任何环节失败则保留缓存供重试
         print("\n✅ 完成")
