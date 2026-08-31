@@ -1,5 +1,9 @@
 .venv/
 .env
+config.json
+cookies.txt
+cache/
+pending/
 *.mp3
 *.mp4
 __pycache__/

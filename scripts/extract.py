@@ -3,8 +3,8 @@
 用法:
   python extract.py --url "https://v.douyin.com/xxxx"
   python extract.py --file /path/to/video.mp4   # 兜底分支：手动传文件
-流程: 下载音频 -> SenseVoice ASR -> DeepSeek 摘要/要点/标签 -> Markdown 入 Obsidian
-配置: ~/.config/video-transcript/.env (API Keys) + config.json (vault_dir)
+流程: 下载音频 -> SenseVoice ASR -> pending Markdown -> Agent 后处理入 Obsidian
+配置: ~/.config/video-transcript/.env (SiliconFlow API Key) + config.json (vault_dir)
 """
 import argparse, hashlib, json, os, re, subprocess, sys, tempfile, time, unicodedata
 from datetime import datetime
@@ -16,8 +16,6 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 
 SF_API = "https://api.siliconflow.cn/v1/audio/transcriptions"
 SF_MODEL = "FunAudioLLM/SenseVoiceSmall"
-DS_API = "https://api.deepseek.com/chat/completions"
-DS_MODEL = "deepseek-chat"
 
 
 def get_ffmpeg():
@@ -36,7 +34,7 @@ def load_config():
         if "=" in line and not line.startswith("#"):
             k, v = line.split("=", 1)
             env[k.strip()] = v.strip()
-    for k in ("SILICONFLOW_API_KEY", "DEEPSEEK_API_KEY"):
+    for k in ("SILICONFLOW_API_KEY",):
         if not env.get(k):
             sys.exit(f"❌ {ENV_FILE} 缺少 {k}，请重新运行 scripts/setup-keys.sh")
     if not CONFIG_FILE.exists():
@@ -83,6 +81,7 @@ SETUP_COOKIES = Path(__file__).parent / "setup-cookies.sh"
 
 
 CACHE_DIR = CONFIG_DIR / "cache"
+PENDING_DIR = CONFIG_DIR / "pending"
 RETRY_WAIT = 30  # 下载失败后重试间隔（秒），避免触发抖音风控
 
 
@@ -148,7 +147,7 @@ def download_audio(url, workdir, ffmpeg):
     audios = list(workdir.glob("*.mp3"))
     if not audios:
         sys.exit("❌ 未找到下载后的音频文件")
-    # 写入缓存：后续环节（ASR/DeepSeek）失败重跑时直接复用，不再请求抖音
+    # 写入缓存：后续环节（ASR 或 pending 写入）失败重跑时直接复用，不再请求抖音
     audios[0].replace(cached_audio)
     cached_meta.write_text(json.dumps(meta, ensure_ascii=False))
     return cached_audio, meta
@@ -184,57 +183,46 @@ def asr(audio_path, key, attempts=5):
             raise
 
 
-def deepseek_polish(transcript, meta, key):
-    prompt = (
-        "你是知识管理助手。以下是一段视频口播逐字稿或社交媒体笔记正文，请输出 JSON（不要 markdown 代码块）：\n"
-        '{"summary": "80字内摘要", "points": ["要点1","要点2","要点3"], "tags": ["标签1","标签2","标签3"], "formatted": "分段排版后的逐字稿全文"}\n'
-        "要求：\n"
-        "- 要点提炼 3-7 条，每条一句话；标签 3-5 个，短词；忠实原文，不虚构\n"
-        "- formatted 字段：把逐字稿按语义自然分段（话题/意思转换处分段，每段 1-4 句话，段间空一行），"
-        "修正明显错误的断句和标点；严禁改写、润色、删减或增补任何内容；"
-        "人名、品牌、术语即使 ASR 识别有误也保持原样；英文句子保留原样\n\n"
-        f"视频标题：{meta.get('title','')}\n逐字稿：\n{transcript[:20000]}"
-    )
-    resp = http_post(
-        DS_API,
-        headers={"Authorization": f"Bearer {key}"},
-        json_body={"model": DS_MODEL, "messages": [{"role": "user", "content": prompt}],
-                   "response_format": {"type": "json_object"}, "temperature": 0.3},
-        timeout=600,
-    )
-    content = resp["choices"][0]["message"]["content"]
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        return {"summary": content[:100], "points": [], "tags": [], "formatted": ""}
+def _yaml_quote(value):
+    value = "" if value is None else str(value)
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ") + '"'
 
 
-def write_markdown(vault_dir, meta, transcript, polish):
-    vault_dir.mkdir(parents=True, exist_ok=True)
-    date = datetime.now().strftime("%Y-%m-%d")
-    fname = f"{date}-{slugify(meta.get('title') or '抖音视频')}.md"
-    path = vault_dir / fname
-    dur = meta.get("duration") or 0
-    dur_str = f"{dur//60}:{dur%60:02d}" if dur else "未知"
-    tags = polish.get("tags", [])
+def _duration_string(duration):
+    duration = int(duration or 0)
+    return f"{duration // 60}:{duration % 60:02d}" if duration else "未知"
+
+
+def _pending_identity(platform, meta, transcript):
+    identity = meta.get("url") or "|".join(
+        (platform, meta.get("title", ""), meta.get("author", ""), transcript)
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+
+
+def write_pending(pending_dir, platform, meta, transcript, extracted=None):
+    """Write the complete extracted text for the Agent to process later."""
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    extracted = extracted or datetime.now().strftime("%Y-%m-%d")
+    title = meta.get("title") or ("小红书笔记" if platform == "xhs" else "抖音视频")
+    suffix = _pending_identity(platform, meta, transcript)
+    path = pending_dir / f"{extracted}-{slugify(title)}-{suffix}.md"
     lines = [
         "---",
-        f'title: "{(meta.get("title") or "").replace(chr(34), "")}"',
-        f'author: "{meta.get("author","")}"',
-        f'source: "{meta.get("url","")}"',
-        f"extracted: {date}",
-        f"duration: \"{dur_str}\"",
-        "tags: [" + ", ".join(tags) + "]",
+        "type: video-transcript-pending",
+        "status: pending",
+        f"platform: {platform}",
+        f"title: {_yaml_quote(title)}",
+        f"author: {_yaml_quote(meta.get('author', ''))}",
+        f"source: {_yaml_quote(meta.get('url', ''))}",
+        f"extracted: {extracted}",
+        f"duration: {_yaml_quote(_duration_string(meta.get('duration')))}",
         "---",
         "",
-        "## 摘要",
-        polish.get("summary", ""),
+        "## 原始文案",
+        transcript,
         "",
-        "## 要点",
     ]
-    lines += [f"- {p}" for p in polish.get("points", [])]
-    # 原文优先使用 DeepSeek 分段排版版（保真，仅分段/修标点）；缺失时回退 ASR 原始文本
-    lines += ["", "## 原文", polish.get("formatted") or transcript, ""]
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
 
@@ -322,19 +310,12 @@ def main():
             audio, meta = extract_audio_from_file(args.file, workdir, ffmpeg)
             print(f"🎙 ASR 转写中（{audio.stat().st_size//1024}KB）...", flush=True)
             transcript = asr(audio, env["SILICONFLOW_API_KEY"])
-        print("🧠 DeepSeek 生成摘要/要点/标签...", flush=True)
-        polish = deepseek_polish(transcript, meta, env["DEEPSEEK_API_KEY"])
-        path = write_markdown(notes_dir_for(vault_dir, platform), meta, transcript, polish)
+        path = write_pending(PENDING_DIR, platform, meta, transcript)
         if args.url:
-            clear_cache(url)  # 全流程成功才清理；任何环节失败则保留缓存供重试
-        print("\n✅ 完成")
-        print(f"📄 {path}")
-        print(f"\n【摘要】{polish.get('summary','')}")
-        if polish.get("points"):
-            print("【要点】")
-            for p in polish["points"]:
-                print(f"  - {p}")
-        print(f"【标签】{', '.join(polish.get('tags', []))}")
+            clear_cache(url)  # pending 文件成功写入后清理；失败时保留缓存供重试
+        print("\n✅ 提取完成，等待 Agent 后处理")
+        print(f"PENDING_FILE={path}")
+        print("Agent 请读取该文件的完整内容，写入最终 Obsidian 笔记并验证成功后再删除它。")
         print(f"\n【原文预览】{transcript[:200]}...")
 
 

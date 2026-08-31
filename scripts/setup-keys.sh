@@ -12,26 +12,22 @@ mkdir -p "$CONFIG_DIR"
 echo "== Video-transcript-skill · API Key 录入 =="
 echo "输入不会回显，Key 只写入本机: $ENV_FILE"
 echo ""
-echo "两个 Key 的获取方式:"
-echo "  1) 硅基流动: https://siliconflow.cn 注册 -> API 密钥（免费，用于语音转文字）"
-echo "  2) DeepSeek: https://platform.deepseek.com -> API Keys（用于摘要/要点/标签）"
+echo "API Key 获取方式:"
+echo "  硅基流动: https://siliconflow.cn 注册 -> API 密钥（用于语音转文字）"
 echo ""
 
-read -s -p "1) 硅基流动 API Key: " SF_KEY
-echo ""
-read -s -p "2) DeepSeek API Key: " DS_KEY
+read -s -p "硅基流动 API Key: " SF_KEY
 echo ""
 echo ""
 
-if [ -z "$SF_KEY" ] || [ -z "$DS_KEY" ]; then
-  echo "❌ 两个 Key 都不能为空，未写入任何内容。"
+if [ -z "$SF_KEY" ]; then
+  echo "❌ API Key 不能为空，未写入任何内容。"
   exit 1
 fi
 
 umask 077
 cat > "$ENV_FILE" <<EOF
 SILICONFLOW_API_KEY=$SF_KEY
-DEEPSEEK_API_KEY=$DS_KEY
 EOF
 chmod 600 "$ENV_FILE"
 
