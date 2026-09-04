@@ -79,7 +79,7 @@ SILICONFLOW_API_KEY=...
 bash <skills目录>/video-transcript/scripts/setup-cookies.sh
 ```
 
-Agent 沙箱可能拦截钥匙串写入，自动导出会得到不完整 cookie。导出过程中若弹出 Chrome Safe Storage 密码框，逐个点“始终允许”。脚本会写入 `~/.config/video-transcript/cookies.txt`（权限为 `600`）。只处理小红书或本地视频时可跳过此步。
+Agent 沙箱可能拦截钥匙串写入，自动导出会得到不完整 cookie。导出过程中若弹出 Chrome Safe Storage 密码框，逐个点“始终允许”。脚本会写入 `~/.config/video-transcript/cookies.txt`（权限为 `600`）。提取脚本后续只读取这个授权快照，并在临时工作目录创建可写副本供 `yt-dlp` 使用，不会修改原始 Cookie 文件。只处理小红书或本地视频时可跳过此步。
 
 ## Step 6：运行提取与 Agent 后处理
 
@@ -122,6 +122,8 @@ PENDING_FILE=/Users/your-name/.config/video-transcript/pending/2026-08-31-标题
 - 抖音 cookie 缺失或失效：按 Step 5 重新导出；不要在对话里传 Cookie
 - 小红书解析失败：确认链接完整，尤其是 App 复制的 `xsec_token` 参数；间隔几分钟后再试
 - ASR 5xx：脚本会有限重试；持续失败时检查硅基流动额度和模型状态，失败期间音频缓存会保留
+- `PermissionError: Operation not permitted` 且路径指向 `cookies.txt`：通常是旧安装副本让 `yt-dlp` 直接回写原始 Cookie；更新到当前版本后重试，不要仅因这个错误重复授权。只有明确提示 cookie 过期或无效时才按 Step 5 重新导出
+- 用户分享内容带 Markdown 链接或附加文字：脚本会提取并规范化纯平台 URL；也可手动传入不带包装的 URL
 - 平台解析持续失败：使用 App 保存本地视频，再走 `--file` 兜底
 - pending 已存在：直接读取 pending 继续后处理，不重新提取
 - 最终笔记写入失败或为空：保留 pending，修复路径或内容后重试

@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -103,6 +104,50 @@ class PendingFileTests(unittest.TestCase):
             extract.notes_dir_for(vault_dir, "xhs"),
             Path("/vault/I-小红书文案"),
         )
+
+    def test_normalize_url_accepts_markdown_link_and_escaped_underscore(self):
+        raw = r"[https://v.douyin.com/hSMokeshs\_o/](https://v.douyin.com/hSMokeshs_o/)"
+        self.assertEqual(
+            extract.normalize_source_url(raw),
+            "https://v.douyin.com/hSMokeshs_o/",
+        )
+
+    def test_download_uses_writable_cookie_copy_and_preserves_source_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            cookie_file = directory / "cookies.txt"
+            cookie_file.write_text("original cookies\n", encoding="utf-8")
+            workdir = directory / "workdir"
+            workdir.mkdir()
+            cache_dir = directory / "cache"
+            seen = {}
+
+            def fake_run(cmd, **kwargs):
+                cookie_path = Path(cmd[cmd.index("--cookies") + 1])
+                seen["cookie_path"] = cookie_path
+                cookie_path.write_text("updated cookies\n", encoding="utf-8")
+                (workdir / "video.info.json").write_text(
+                    json.dumps(
+                        {
+                            "title": "测试视频",
+                            "uploader": "作者",
+                            "webpage_url": "https://www.douyin.com/video/1",
+                            "duration": 1,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                (workdir / "video.mp3").write_bytes(b"audio")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            with patch.object(extract, "COOKIE_FILE", cookie_file), patch.object(
+                extract, "CACHE_DIR", cache_dir
+            ), patch.object(extract.subprocess, "run", side_effect=fake_run):
+                extract.download_audio("https://example.test/video/1", workdir, "ffmpeg")
+
+            self.assertNotEqual(seen["cookie_path"], cookie_file)
+            self.assertEqual(seen["cookie_path"].parent, workdir)
+            self.assertEqual(cookie_file.read_text(encoding="utf-8"), "original cookies\n")
 
     def test_main_writes_absolute_pending_path_after_mocked_local_extraction(self):
         with tempfile.TemporaryDirectory() as directory:

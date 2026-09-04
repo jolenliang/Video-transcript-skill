@@ -6,7 +6,7 @@
 流程: 下载音频 -> SenseVoice ASR -> pending Markdown -> Agent 后处理入 Obsidian
 配置: ~/.config/video-transcript/.env (SiliconFlow API Key) + config.json (vault_dir)
 """
-import argparse, hashlib, json, os, re, subprocess, sys, tempfile, time, unicodedata
+import argparse, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time, unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -83,6 +83,11 @@ SETUP_COOKIES = Path(__file__).parent / "setup-cookies.sh"
 CACHE_DIR = CONFIG_DIR / "cache"
 PENDING_DIR = CONFIG_DIR / "pending"
 RETRY_WAIT = 30  # 下载失败后重试间隔（秒），避免触发抖音风控
+SOURCE_URL_RE = re.compile(
+    r"https?://[^\s\]\)<>\"']*(?:douyin\.com|xhslink\.cn|xiaohongshu\.com)"
+    r"[^\s\]\)<>\"']*",
+    re.IGNORECASE,
+)
 
 
 def _cache_paths(url):
@@ -100,6 +105,21 @@ def clear_cache(url):
         pass
 
 
+def writable_cookie_copy(workdir):
+    """Copy the user-managed cookie snapshot before invoking yt-dlp.
+
+    yt-dlp may refresh and save a cookie jar when it exits. The original
+    snapshot can be read by the Agent but may not be writable from its
+    sandbox, so all refreshes happen in this disposable working directory.
+    """
+    if not COOKIE_FILE.exists():
+        return None
+    cookie_copy = workdir / ".cookies.txt"
+    shutil.copyfile(COOKIE_FILE, cookie_copy)
+    cookie_copy.chmod(0o600)
+    return cookie_copy
+
+
 def download_audio(url, workdir, ffmpeg):
     """yt-dlp + 导出的 cookie 文件下载音频，返回 (音频路径, 元信息dict)。
     cookie 文件由用户在终端运行 setup-cookies.sh 一次性导出（Agent 沙箱无法写钥匙串，
@@ -110,6 +130,7 @@ def download_audio(url, workdir, ffmpeg):
     if not COOKIE_FILE.exists():
         sys.exit(f"❌ 缺少 cookie 文件。请在你自己的终端运行一次（今后不再弹钥匙串窗口）:\n"
                  f"  bash {SETUP_COOKIES}")
+    cookie_path = writable_cookie_copy(workdir)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cached_audio, cached_meta = _cache_paths(url)
     if cached_audio.exists() and cached_meta.exists():
@@ -117,7 +138,7 @@ def download_audio(url, workdir, ffmpeg):
         return cached_audio, json.loads(cached_meta.read_text())
     cmd = [
         sys.executable, "-m", "yt_dlp",
-        "--cookies", str(COOKIE_FILE),
+        "--cookies", str(cookie_path),
         "-x", "--audio-format", "mp3",
         "--ffmpeg-location", ffmpeg,
         "--write-info-json", "--no-playlist",
@@ -227,6 +248,15 @@ def write_pending(pending_dir, platform, meta, transcript, extracted=None):
     return path
 
 
+def normalize_source_url(value):
+    """Extract a supported platform URL from plain text or Markdown input."""
+    value = str(value or "")
+    match = SOURCE_URL_RE.search(value)
+    if not match:
+        return value.strip()
+    return match.group(0).replace("\\", "")
+
+
 def detect_platform(url):
     if "xhslink.cn" in url or "xiaohongshu.com" in url:
         return "xhs"
@@ -240,13 +270,14 @@ def notes_dir_for(vault_dir, platform):
     return vault_dir
 
 
-def fetch_xhs_metadata(url, ffmpeg):
+def fetch_xhs_metadata(url, ffmpeg, workdir):
     """小红书笔记元数据（匿名即可，无需 cookie；有 cookie 文件则顺带使用）。
     返回 (meta, has_video, 正文)。遵守反爬纪律：失败等 30 秒只重试 1 次。"""
     cmd = [sys.executable, "-m", "yt_dlp", "-j", "--simulate", "--no-playlist",
            "--ignore-no-formats-error", "--ffmpeg-location", ffmpeg]
-    if COOKIE_FILE.exists():
-        cmd += ["--cookies", str(COOKIE_FILE)]
+    cookie_path = writable_cookie_copy(workdir)
+    if cookie_path:
+        cmd += ["--cookies", str(cookie_path)]
     cmd.append(url)
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if p.returncode != 0 or not p.stdout.strip():
@@ -281,14 +312,13 @@ def main():
         workdir = Path(td)
         platform = "douyin"
         if args.url:
-            url = args.url.strip()
-            m = re.search(r"https?://\S*(?:douyin\.com|xhslink\.cn|xiaohongshu\.com)\S*", url)
-            if m:
-                url = m.group(0)
+            url = normalize_source_url(args.url)
+            if not SOURCE_URL_RE.search(url):
+                sys.exit("❌ 未找到有效的抖音或小红书链接，请传入纯 URL 或完整 Markdown 链接")
             platform = detect_platform(url)
             if platform == "xhs":
                 print("⏬ 解析小红书笔记...", flush=True)
-                meta, has_video, note_text = fetch_xhs_metadata(url, ffmpeg)
+                meta, has_video, note_text = fetch_xhs_metadata(url, ffmpeg, workdir)
                 if has_video:
                     print("🎬 视频笔记，下载音频...", flush=True)
                     audio, vmeta = download_audio(url, workdir, ffmpeg)

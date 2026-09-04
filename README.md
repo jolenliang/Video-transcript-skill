@@ -35,7 +35,7 @@
                          验证最终文件非空 -> 删除对应 pending 文件
 ```
 
-脚本不调用文本生成 API，也不直接写入最终 Obsidian 笔记。唯一需要配置的 API Key 是硅基流动 Key，用于 SenseVoice 语音转文字。
+脚本不调用文本生成 API，也不直接写入最终 Obsidian 笔记。唯一需要配置的 API Key 是硅基流动 Key，用于 SenseVoice 语音转文字。抖音 Cookie 文件只作为本地授权快照读取；脚本会复制到临时目录供 `yt-dlp` 使用，避免 Agent 沙箱因阻止 Cookie 文件回写而误报需要重新授权。
 
 ## Pending 文件
 
@@ -88,6 +88,8 @@ Agent 写入最终文件并确认文件存在且非空后，执行：
 - 小红书：使用配置目录的同级 `<vault>/I-小红书文案/`
 
 音频按来源链接缓存到 `~/.config/video-transcript/cache/`。pending 文件成功写入后，脚本清理本次音频缓存；下载、ASR 或 pending 写入失败时保留缓存，以便重试命中并减少平台请求。视频本身不永久落盘。
+
+如果看到 `PermissionError: Operation not permitted` 并且错误路径指向 `~/.config/video-transcript/cookies.txt`，先确认使用的是最新安装副本并重试。这通常是旧版本把原始 Cookie 文件直接交给 `yt-dlp`，而沙箱禁止其写回；新版本会使用临时 Cookie 副本。只有出现明确的 cookie 过期或无效提示时，才需要在用户自己的终端重新运行 `scripts/setup-cookies.sh`。分享文案中的 Markdown 链接、反斜杠转义和附加文字由脚本自动规范化。
 
 ## 系统要求
 
