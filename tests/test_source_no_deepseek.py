@@ -17,6 +17,13 @@ class DocumentationAndSetupTests(unittest.TestCase):
             self.assertIn("pending", source.lower(), name)
             self.assertIn("Agent", source, name)
 
+    def test_cleanup_script_does_not_own_semantic_quality_rules(self):
+        source = (ROOT / "scripts" / "complete.py").read_text(encoding="utf-8")
+        self.assertNotIn("quality", source.lower())
+        self.assertNotIn("emoji", source.lower())
+        self.assertNotIn("paragraph", source.lower())
+        self.assertIn("non-empty", source)
+
 
 if __name__ == "__main__":
     unittest.main()

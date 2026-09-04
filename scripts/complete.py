@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Remove one pending file after the Agent has verified the final note."""
+"""Remove one pending file after the Agent has finished the final note."""
 
 import argparse
 from pathlib import Path
@@ -19,7 +19,9 @@ def remove_pending_after_success(pending_path, final_path):
         raise ValueError("pending file must be inside the configured pending directory")
     if not pending_path.is_file():
         raise ValueError("pending file does not exist")
-    if not final_path.is_file() or not final_path.read_text(encoding="utf-8").strip():
+    if not final_path.is_file():
+        raise ValueError("final note must exist and be non-empty before cleanup")
+    if not final_path.read_text(encoding="utf-8").strip():
         raise ValueError("final note must exist and be non-empty before cleanup")
     pending_path.unlink()
     return pending_path
