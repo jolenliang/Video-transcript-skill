@@ -1,16 +1,19 @@
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 
 
 def load_module(name, path):
@@ -149,6 +152,42 @@ class PendingFileTests(unittest.TestCase):
             self.assertEqual(seen["cookie_path"].parent, workdir)
             self.assertEqual(cookie_file.read_text(encoding="utf-8"), "original cookies\n")
 
+    def test_xhs_video_download_does_not_require_cookie_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            workdir = directory / "workdir"
+            workdir.mkdir()
+            cache_dir = directory / "cache"
+
+            def fake_run(cmd, **kwargs):
+                self.assertNotIn("--cookies", cmd)
+                (workdir / "video.info.json").write_text(
+                    json.dumps(
+                        {
+                            "title": "小红书视频",
+                            "uploader": "作者",
+                            "webpage_url": "https://www.xiaohongshu.com/explore/1",
+                            "duration": 1,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                (workdir / "video.mp3").write_bytes(b"audio")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            with patch.object(extract, "COOKIE_FILE", directory / "missing.txt"), patch.object(
+                extract, "CACHE_DIR", cache_dir
+            ), patch.object(extract.subprocess, "run", side_effect=fake_run):
+                audio, meta = extract.download_audio(
+                    "https://www.xiaohongshu.com/explore/1",
+                    workdir,
+                    "ffmpeg",
+                    require_cookie=False,
+                )
+
+            self.assertTrue(audio.exists())
+            self.assertEqual(meta["title"], "小红书视频")
+
     def test_main_writes_absolute_pending_path_after_mocked_local_extraction(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
@@ -186,6 +225,213 @@ class PendingFileTests(unittest.TestCase):
         source = (ROOT / "scripts" / "extract.py").read_text(encoding="utf-8")
         self.assertNotIn("deepseek", source.lower())
         self.assertNotIn("DEEPSEEK_API_KEY", source)
+
+    def test_douyin_url_uses_browser_media_without_cookie_or_yt_dlp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            pending_dir = directory / "pending"
+            media = directory / "captured.mp4"
+            media.write_bytes(b"mock media")
+            source = "https://www.douyin.com/video/123"
+            browser_result = SimpleNamespace(
+                status="READY",
+                metadata={
+                    "title": "浏览器视频",
+                    "author": "作者",
+                    "url": source,
+                    "duration": 2,
+                },
+                media={
+                    "url": media.as_uri(),
+                    "kind": "video",
+                    "content_type": "video/mp4",
+                },
+                error="",
+            )
+            output = io.StringIO()
+            with patch.object(extract, "PENDING_DIR", pending_dir), patch.object(
+                extract,
+                "load_config",
+                return_value=({"SILICONFLOW_API_KEY": "mock-key"}, directory / "vault"),
+            ), patch.object(extract, "get_ffmpeg", return_value="ffmpeg"), patch.object(
+                extract, "capture_douyin_media", return_value=browser_result
+            ), patch.object(
+                extract, "download_captured_media", return_value=media
+            ), patch.object(
+                extract, "extract_audio_from_captured_media",
+                return_value=(media, browser_result.metadata),
+            ), patch.object(
+                extract, "asr", return_value="浏览器提取的完整文案"
+            ), patch.object(
+                extract.subprocess, "run", side_effect=AssertionError("yt-dlp must not run")
+            ), patch.object(
+                extract, "COOKIE_FILE", directory / "missing-cookies.txt"
+            ), patch.object(
+                sys, "argv", ["extract.py", "--url", source]
+            ), redirect_stdout(output):
+                extract.main()
+
+            pending_files = list(pending_dir.glob("*.md"))
+            self.assertEqual(len(pending_files), 1)
+            self.assertIn("浏览器提取的完整文案", pending_files[0].read_text(encoding="utf-8"))
+            self.assertIn("PENDING_FILE=", output.getvalue())
+
+    def test_douyin_browser_failure_does_not_suggest_fresh_cookies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            browser_result = SimpleNamespace(
+                status="BROWSER_MEDIA_NOT_FOUND",
+                metadata={},
+                media=None,
+                error="当前页面没有捕获到可用媒体源",
+            )
+            with patch.object(
+                extract,
+                "load_config",
+                return_value=({"SILICONFLOW_API_KEY": "mock-key"}, directory / "vault"),
+            ), patch.object(extract, "get_ffmpeg", return_value="ffmpeg"), patch.object(
+                extract, "capture_douyin_media", return_value=browser_result
+            ), patch.object(sys, "argv", ["extract.py", "--url", "https://www.douyin.com/video/123"]):
+                with self.assertRaises(SystemExit) as raised:
+                    extract.main()
+
+            self.assertIn("BROWSER_MEDIA_NOT_FOUND", str(raised.exception))
+            self.assertNotIn("Fresh cookies", str(raised.exception))
+
+    def test_douyin_browser_media_does_not_use_persistent_url_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            pending_dir = directory / "pending"
+            media = directory / "captured.mp4"
+            media.write_bytes(b"mock media")
+            browser_result = SimpleNamespace(
+                status="READY",
+                metadata={"title": "不缓存", "url": "https://www.douyin.com/video/123"},
+                media={"url": media.as_uri(), "kind": "video", "content_type": "video/mp4"},
+                error="",
+            )
+            cache_dir = directory / "cache"
+            with patch.object(extract, "PENDING_DIR", pending_dir), patch.object(
+                extract,
+                "load_config",
+                return_value=({"SILICONFLOW_API_KEY": "mock-key"}, directory / "vault"),
+            ), patch.object(extract, "get_ffmpeg", return_value="ffmpeg"), patch.object(
+                extract, "capture_douyin_media", return_value=browser_result
+            ), patch.object(
+                extract, "download_captured_media", return_value=media
+            ), patch.object(
+                extract, "extract_audio_from_captured_media", return_value=(media, browser_result.metadata)
+            ), patch.object(extract, "asr", return_value="文案"), patch.object(
+                extract, "CACHE_DIR", cache_dir
+            ), patch.object(sys, "argv", ["extract.py", "--url", browser_result.metadata["url"]]):
+                extract.main()
+
+            self.assertFalse(cache_dir.exists())
+
+    def test_captured_media_download_uses_only_minimal_headers(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, _size):
+                if getattr(self, "read_once", False):
+                    return b""
+                self.read_once = True
+                return b"audio"
+
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["headers"] = dict(request.header_items())
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "captured.m4a"
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                extract.download_captured_media(
+                    "https://cdn.douyinvod.com/audio.m4a?token=secret",
+                    destination,
+                    user_agent="Browser UA",
+                )
+
+        self.assertEqual(captured["headers"]["User-agent"], "Browser UA")
+        self.assertEqual(captured["headers"]["Referer"], "https://www.douyin.com/")
+        self.assertNotIn("Cookie", captured["headers"])
+
+    def test_captured_media_download_rejects_foreign_host(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ValueError):
+                extract.download_captured_media(
+                    "https://example.com/video.mp4",
+                    Path(directory) / "video.mp4",
+                )
+
+    def test_audio_media_is_downloaded_without_ffmpeg(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            audio = directory / "source.m4a"
+            audio.write_bytes(b"audio")
+            workdir = directory / "work"
+            workdir.mkdir()
+
+            def fake_download(_url, destination, **_kwargs):
+                Path(destination).write_bytes(audio.read_bytes())
+                return Path(destination)
+
+            with patch.object(extract, "download_captured_media", side_effect=fake_download) as download:
+                result_path, metadata = extract.extract_audio_from_captured_media(
+                    {
+                        "url": "https://cdn.douyinvod.com/audio.m4a?token=secret",
+                        "kind": "audio",
+                    },
+                    workdir,
+                    "ffmpeg",
+                )
+
+            self.assertEqual(result_path.name, "captured.m4a")
+            self.assertEqual(metadata, {})
+            download.assert_called_once()
+
+    def test_video_media_uses_ffmpeg_copy_before_mp3_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            source = directory / "source.mp4"
+            source.write_bytes(b"video")
+            workdir = directory / "work"
+            workdir.mkdir()
+            calls = []
+
+            def fake_run(cmd, **kwargs):
+                calls.append(cmd)
+                if len(calls) == 1:
+                    return subprocess.CompletedProcess(cmd, 1, "", "copy failed")
+                Path(cmd[-1]).write_bytes(b"mp3")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            def fake_download(_url, destination, **_kwargs):
+                Path(destination).write_bytes(source.read_bytes())
+                return Path(destination)
+
+            with patch.object(extract, "download_captured_media", side_effect=fake_download), patch.object(
+                extract.subprocess, "run", side_effect=fake_run
+            ):
+                result_path, _ = extract.extract_audio_from_captured_media(
+                    {
+                        "url": "https://cdn.douyinvod.com/video.mp4?token=secret",
+                        "kind": "video",
+                    },
+                    workdir,
+                    "ffmpeg",
+                )
+
+            self.assertEqual(result_path.name, "captured-audio.mp3")
+            self.assertEqual(len(calls), 2)
+            self.assertIn("-c:a", calls[0])
+            self.assertIn("libmp3lame", calls[1])
 
 
 class PendingCleanupTests(unittest.TestCase):

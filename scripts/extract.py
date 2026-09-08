@@ -10,6 +10,19 @@ import argparse, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time,
 from datetime import datetime
 from pathlib import Path
 
+try:
+    from douyin_browser import (
+        DEFAULT_PROFILE_DIR,
+        MEDIA_STATUS_READY,
+        capture_douyin_media,
+    )
+except ImportError:
+    from scripts.douyin_browser import (
+        DEFAULT_PROFILE_DIR,
+        MEDIA_STATUS_READY,
+        capture_douyin_media,
+    )
+
 CONFIG_DIR = Path.home() / ".config/video-transcript"
 ENV_FILE = CONFIG_DIR / ".env"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -120,14 +133,15 @@ def writable_cookie_copy(workdir):
     return cookie_copy
 
 
-def download_audio(url, workdir, ffmpeg):
-    """yt-dlp + 导出的 cookie 文件下载音频，返回 (音频路径, 元信息dict)。
-    cookie 文件由用户在终端运行 setup-cookies.sh 一次性导出（Agent 沙箱无法写钥匙串，
-    自动导出会得到不完整的 cookie），过期时同样引导用户重跑该脚本。
-    反爬纪律：1) 下载成功的音频按链接缓存，ASR 等后续环节失败重跑时不再请求抖音；
-    2) 下载失败最多自动重试 1 次，且先等待 RETRY_WAIT 秒；仍失败即退出，不连续重试。"""
+def download_audio(url, workdir, ffmpeg, require_cookie=True):
+    """Use yt-dlp to download audio for the legacy/XHS path.
+
+    Cookie is optional for XHS. The current Douyin path does not call this
+    function; `require_cookie=True` only preserves compatibility for callers
+    that explicitly use the legacy flow.
+    """
     out_tpl = str(workdir / "%(id)s.%(ext)s")
-    if not COOKIE_FILE.exists():
+    if require_cookie and not COOKIE_FILE.exists():
         sys.exit(f"❌ 缺少 cookie 文件。请在你自己的终端运行一次（今后不再弹钥匙串窗口）:\n"
                  f"  bash {SETUP_COOKIES}")
     cookie_path = writable_cookie_copy(workdir)
@@ -138,12 +152,13 @@ def download_audio(url, workdir, ffmpeg):
         return cached_audio, json.loads(cached_meta.read_text())
     cmd = [
         sys.executable, "-m", "yt_dlp",
-        "--cookies", str(cookie_path),
         "-x", "--audio-format", "mp3",
         "--ffmpeg-location", ffmpeg,
         "--write-info-json", "--no-playlist",
         "-o", out_tpl, url,
     ]
+    if cookie_path:
+        cmd[3:3] = ["--cookies", str(cookie_path)]
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if p.returncode != 0:
         print(f"⏳ 下载失败，等待 {RETRY_WAIT} 秒（避免触发风控）后重试最后一次...", flush=True)
@@ -179,6 +194,82 @@ def extract_audio_from_file(video, workdir, ffmpeg):
     subprocess.run([ffmpeg, "-y", "-i", str(video), "-vn", "-acodec", "libmp3lame", "-q:a", "4", str(out)],
                    capture_output=True, timeout=300, check=True)
     return out, {"title": Path(video).stem, "author": "", "url": "", "duration": 0}
+
+
+def download_captured_media(media_url, destination, user_agent="", referer="https://www.douyin.com/"):
+    """Download one browser-captured media source without replaying cookies."""
+    import urllib.request
+    from urllib.parse import urlparse
+
+    host = (urlparse(str(media_url or "")).hostname or "").lower().rstrip(".")
+    if not any(host == domain or host.endswith("." + domain) for domain in ("douyinvod.com", "ixigua.com")):
+        raise ValueError("媒体地址不是抖音允许的 CDN 地址")
+
+    request = urllib.request.Request(
+        str(media_url),
+        headers={
+            "User-Agent": user_agent or "Mozilla/5.0",
+            "Referer": referer or "https://www.douyin.com/",
+        },
+    )
+    total = 0
+    with urllib.request.urlopen(request, timeout=300) as response:
+        with open(destination, "wb") as output:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                output.write(chunk)
+                total += len(chunk)
+    if total <= 0:
+        raise RuntimeError("媒体响应为空")
+    return Path(destination)
+
+
+def extract_audio_from_captured_media(media, workdir, ffmpeg, already_downloaded=False):
+    """Download a captured source and return a temporary audio path plus metadata."""
+    media = dict(media or {})
+    kind = media.get("kind")
+    suffix = ".m4a" if kind == "audio" else ".mp4"
+    source = Path(media.get("local_path")) if already_downloaded else workdir / ("captured" + suffix)
+    if not already_downloaded:
+        download_captured_media(
+            media.get("url"),
+            source,
+            user_agent=media.get("user_agent", ""),
+            referer=media.get("referer", "https://www.douyin.com/"),
+        )
+    if not source.is_file() or source.stat().st_size <= 0:
+        raise RuntimeError("浏览器捕获的临时媒体文件不存在或为空")
+    if kind == "audio":
+        return source, {}
+
+    copied = workdir / "captured-audio.m4a"
+    result = subprocess.run(
+        [ffmpeg, "-y", "-i", str(source), "-vn", "-c:a", "copy", str(copied)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if result.returncode == 0 and copied.exists() and copied.stat().st_size > 0:
+        return copied, {}
+
+    encoded = workdir / "captured-audio.mp3"
+    result = subprocess.run(
+        [ffmpeg, "-y", "-i", str(source), "-vn", "-acodec", "libmp3lame", "-q:a", "4", str(encoded)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if result.returncode != 0 or not encoded.exists() or encoded.stat().st_size <= 0:
+        raise RuntimeError(f"音频提取失败: {result.stderr[-300:]}")
+    return encoded, {}
+
+
+def browser_failure_message(result):
+    status = getattr(result, "status", "BROWSER_NOT_READY")
+    error = getattr(result, "error", "")
+    return f"❌ 抖音浏览器提取失败 [{status}]。{error}\n本次未重新导出 Cookie，也未回退到 yt-dlp、f2 或第三方解析。"
 
 
 def asr(audio_path, key, attempts=5):
@@ -321,7 +412,7 @@ def main():
                 meta, has_video, note_text = fetch_xhs_metadata(url, ffmpeg, workdir)
                 if has_video:
                     print("🎬 视频笔记，下载音频...", flush=True)
-                    audio, vmeta = download_audio(url, workdir, ffmpeg)
+                    audio, vmeta = download_audio(url, workdir, ffmpeg, require_cookie=False)
                     meta = {**meta, **{k: v for k, v in vmeta.items() if v}}
                     print(f"🎙 ASR 转写中（{audio.stat().st_size//1024}KB）...", flush=True)
                     transcript = asr(audio, env["SILICONFLOW_API_KEY"])
@@ -331,8 +422,25 @@ def main():
                         sys.exit("❌ 未提取到正文（笔记可能已删除或需要登录）")
                     transcript = note_text
             else:
-                print("⏬ 解析并下载音频...", flush=True)
-                audio, meta = download_audio(url, workdir, ffmpeg)
+                print("🌐 启动专用可见浏览器并提取媒体...", flush=True)
+                browser_result = capture_douyin_media(
+                    url,
+                    profile_dir=DEFAULT_PROFILE_DIR,
+                    media_output_dir=workdir,
+                )
+                if browser_result.status != MEDIA_STATUS_READY or not browser_result.media:
+                    sys.exit(browser_failure_message(browser_result))
+                meta = browser_result.metadata
+                try:
+                    audio, media_meta = extract_audio_from_captured_media(
+                        browser_result.media,
+                        workdir,
+                        ffmpeg,
+                        already_downloaded=bool(browser_result.media.get("local_path")),
+                    )
+                except Exception as error:
+                    sys.exit(f"❌ 抖音浏览器媒体处理失败 [AUDIO_EXTRACTION_FAILED]：{error}")
+                meta = {**meta, **{k: v for k, v in media_meta.items() if v}}
                 print(f"🎙 ASR 转写中（{audio.stat().st_size//1024}KB）...", flush=True)
                 transcript = asr(audio, env["SILICONFLOW_API_KEY"])
         else:
@@ -341,7 +449,7 @@ def main():
             print(f"🎙 ASR 转写中（{audio.stat().st_size//1024}KB）...", flush=True)
             transcript = asr(audio, env["SILICONFLOW_API_KEY"])
         path = write_pending(PENDING_DIR, platform, meta, transcript)
-        if args.url:
+        if args.url and platform == "xhs":
             clear_cache(url)  # pending 文件成功写入后清理；失败时保留缓存供重试
         print("\n✅ 提取完成，等待 Agent 后处理")
         print(f"PENDING_FILE={path}")

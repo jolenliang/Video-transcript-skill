@@ -17,17 +17,19 @@ if [ "$(uname)" != "Darwin" ]; then
   exit 1
 fi
 
-PY="$(command -v python3 || true)"
+PY=""
+for CANDIDATE in python3.13 python3.12 python3.11 python3.10 python3.9 python3; do
+  CANDIDATE_PATH="$(command -v "$CANDIDATE" || true)"
+  if [ -n "$CANDIDATE_PATH" ] && [ "$("$CANDIDATE_PATH" -c 'import sys; print(1 if sys.version_info >= (3,9) else 0)')" = "1" ]; then
+    PY="$CANDIDATE_PATH"
+    break
+  fi
+done
 if [ -z "$PY" ]; then
-  echo "❌ 未找到 python3。请先安装: xcode-select --install 或 brew install python@3.13"
+  echo "❌ 未找到 Python 3.9+。建议安装: brew install python@3.13"
   exit 1
 fi
 PY_VER="$("$PY" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-PY_OK="$("$PY" -c 'import sys; print(1 if sys.version_info >= (3,9) else 0)')"
-if [ "$PY_OK" != "1" ]; then
-  echo "❌ python3 版本过低（$PY_VER），需要 >= 3.9。建议: brew install python@3.13"
-  exit 1
-fi
 echo "✅ python3 $PY_VER ($PY)"
 
 # 2. 创建 venv 并安装依赖
@@ -35,13 +37,17 @@ if [ ! -x "$SKILL_DIR/.venv/bin/python" ]; then
   echo "📦 创建虚拟环境 .venv ..."
   "$PY" -m venv "$SKILL_DIR/.venv"
 fi
-echo "📦 安装依赖 yt-dlp + imageio-ffmpeg + curl_cffi ..."
-"$SKILL_DIR/.venv/bin/pip" install -q --upgrade pip yt-dlp imageio-ffmpeg "curl_cffi>=0.15"
-# 说明: curl_cffi 不是可选优化，而是刚需——抖音校验 TLS 指纹，
-# 缺了它 yt-dlp 会报 "Fresh cookies needed"（实际 cookie 没问题）
+echo "📦 安装依赖 Playwright + yt-dlp + imageio-ffmpeg ..."
+"$SKILL_DIR/.venv/bin/pip" install -q --upgrade pip playwright yt-dlp imageio-ffmpeg
+echo "📦 安装 Playwright Chromium 运行时 ..."
+"$SKILL_DIR/.venv/bin/python" -m playwright install chromium
 echo "✅ 依赖安装完成"
 
 mkdir -p "$CONFIG_DIR"
+PROFILE_DIR="$CONFIG_DIR/browser-profile"
+mkdir -p "$PROFILE_DIR"
+chmod 700 "$PROFILE_DIR"
+echo "✅ 已准备抖音专用浏览器 Profile: $PROFILE_DIR"
 
 # 3. 写入 vault 配置（如果提供了参数）
 if [ -n "$1" ]; then
@@ -82,3 +88,4 @@ echo ""
 echo "== Agent 下一步 =="
 echo "1) 将上述 vault 列表呈现给用户，让用户选一个，并确认子目录（默认: <vault>/I-抖音文案）"
 echo "2) 再次运行: bash $SKILL_DIR/scripts/setup.sh \"<用户选定的完整目录>\""
+echo "3) 首次提取抖音链接时会打开专用可见浏览器，请在该窗口中登录一次"

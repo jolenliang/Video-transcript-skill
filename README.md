@@ -2,7 +2,36 @@
 
 抖音视频口播 / 小红书笔记（图文+视频）提取为完整文字，再由当前 AI Agent 整理为 Obsidian 笔记。
 
-粘贴抖音或小红书分享链接给你的 AI Agent，或提供本地视频文件。脚本负责解析、下载音频和语音转文字；Agent 负责摘要、要点、标签、排版和最终文件写入。默认笔记存入 Obsidian 的 `I-抖音文案/` 或 `I-小红书文案/`。小红书图文无需 cookie、秒级完成。
+你的实际使用方式可以保持不变：手机复制抖音链接，发送给 Mac 端 Codex。Mac 端按需启动一个专用可见浏览器窗口，完成单条视频提取；不需要提前打开网页、不需要长期挂着网页、不需要手动保存视频，也不需要导出 Cookie。
+
+## 工作原理
+
+```text
+手机端 Codex 传入单条抖音 URL
+                |
+                v
+Mac Agent 按需启动专用可见 Chromium
+                |
+                v
+独立持久化 Profile 打开抖音视频页
+                |
+                v
+页面自行处理登录、动态参数和安全验证
+                |
+                v
+捕获当前页面一个媒体源 -> 临时音频 -> SenseVoice ASR
+                |
+                v
+~/.config/video-transcript/pending/<日期>-<标题>-<唯一后缀>.md
+                |
+                v
+Agent 读取完整 pending -> 摘要/要点/标签/原文 -> Obsidian
+                |
+                v
+验证最终文件非空 -> 删除对应 pending 文件
+```
+
+抖音默认不调用 `yt-dlp`、f2、抖音 Web API 或第三方在线解析服务，不读取或导出 `cookies.txt`。小红书分支继续使用 `yt-dlp`；本地视频继续使用 ffmpeg 和现有 ASR。
 
 ## 一键安装
 
@@ -10,112 +39,111 @@
 
 > **帮我安装这个 skill 并配置好：https://github.com/jolenliang/Video-transcript-skill**
 
-你只需要在自己的终端完成两项操作：
+安装时只需要在自己的终端录入一个硅基流动 API Key：
 
-1. 运行 `scripts/setup-keys.sh`，录入一个硅基流动 API Key。输入不会回显，Key 只保存在本机。
-2. 使用抖音链接时，在 Chrome 登录 [douyin.com](https://www.douyin.com)，再运行 `scripts/setup-cookies.sh` 导出 cookie。只提取小红书或处理本地视频时可跳过。
-
-安装完成后，粘贴链接并说“提取文案”即可。若平台解析失败，可在抖音 App 保存视频后直接把本地视频交给 Agent。
-
-## 工作原理
-
-```text
-抖音链接   -> yt-dlp 下载音频（Chrome cookie）-> 硅基流动 SenseVoice ASR
-小红书图文 -> yt-dlp 读取元数据和正文（匿名即可）
-小红书视频 -> yt-dlp 下载音频 -> 硅基流动 SenseVoice ASR
-本地视频   -> ffmpeg 提取音频 -> 硅基流动 SenseVoice ASR
-                                      |
-                                      v
-                ~/.config/video-transcript/pending/<日期>-<标题>-<唯一后缀>.md
-                                      |
-                                      v
-             Agent 读取完整 pending -> 生成摘要/要点/标签/原文 -> Obsidian
-                                      |
-                                      v
-                         验证最终文件非空 -> 删除对应 pending 文件
+```bash
+bash <skill目录>/scripts/setup.sh
+bash <skill目录>/scripts/setup-keys.sh
 ```
 
-脚本不调用文本生成 API，也不直接写入最终 Obsidian 笔记。唯一需要配置的 API Key 是硅基流动 Key，用于 SenseVoice 语音转文字。抖音 Cookie 文件只作为本地授权快照读取；脚本会复制到临时目录供 `yt-dlp` 使用，避免 Agent 沙箱因阻止 Cookie 文件回写而误报需要重新授权。
-
-## Pending 文件
-
-待处理文件固定在：
+`setup.sh` 会安装 Playwright、yt-dlp、imageio-ffmpeg，并安装 Chromium 运行时。它会准备专用 Profile：
 
 ```text
-~/.config/video-transcript/pending/
+~/.config/video-transcript/browser-profile/
 ```
 
-文件是带 YAML 元数据的 Markdown，包含 `type: video-transcript-pending`、`status: pending`、平台、标题、作者、来源、提取日期、时长，以及 `## 原始文案` 下的完整提取文本。原文不会按 20,000 字符截断。
+首次提取抖音链接时，专用可见浏览器会打开。请在这个窗口中手动登录一次，登录状态保存在独立 Profile；后续按需启动并复用。该窗口不是常驻服务，任务结束会关闭。
 
-脚本成功后会输出机器可识别的绝对路径：
+## 使用
+
+抖音：
+
+```text
+手机复制链接 -> 发给 Mac 端 Codex -> 说“提取文案”
+```
+
+小红书或本地视频也可直接交给 Agent。脚本成功后输出：
 
 ```text
 PENDING_FILE=/Users/your-name/.config/video-transcript/pending/2026-08-31-标题-abc123.md
 ```
 
-Agent 必须读取这个文件的完整内容，而不是依赖终端预览。默认最终笔记结构为：
+Agent 必须读取该文件的完整内容，而不是依赖终端预览。默认最终笔记包含：
 
 ```markdown
----
-title: "..."
-author: "..."
-source: "..."
-extracted: 2026-08-31
-duration: "1:39"
-tags: [标签]
----
 ## 摘要
 ...
 ## 要点
-- ...
+- 每条保留必要背景，建议 25-90 字，不超过 100 字
 ## 原文
-...
+按语义自然分段，删除 Unicode 表情但不改写事实
 ```
 
-### 可读性规则
+最终文件写入成功、存在且非空，并完成可读性自检后，Agent 才删除对应 pending。失败或中断时 pending 保留，重试直接读取它。
 
-- 长文（原文超过 1600 字）生成 8-15 条要点，中等长度生成 6-12 条，短文生成 3-8 条。
-- 每条要点建议 25-90 字，不能超过 100 字；要写清“结论 + 必要背景或影响”，不能只留下过于精简的标签式句子。
-- 原文保留完整事实和顺序，只做排版：删除 Unicode 表情，按话题转换和语义完整句群自然分段，通常每段 2-4 句，最长不超过约 600 字或 8 个句末标点；不得为了通顺而虚构、改写或删减内容。
-- Agent 写入后应自行检查要点数量、每条长度、原文段落数和表情数量；检查不通过时不得调用清理脚本或删除 pending 文件。`complete.py` 不判断这些语义质量，只负责确认最终文件存在且非空后删除指定 pending 文件。
+## 账号安全边界
 
-如果用户要求改善已经保存的 Obsidian 笔记，Agent 应直接读取本地 Markdown 进行修订，不重新访问抖音或小红书，不下载视频，不重复执行 ASR。
+- 单条、低频、用户主动触发。
+- 使用独立可见浏览器 Profile，不连接日常 Chrome。
+- 不导出或读取 Cookie，不调用 `Network.getAllCookies`。
+- 不访问主页、不批量翻页、不点赞、关注、评论或发布。
+- 不自动刷新，不连续撞请求。
+- 不实现动态签名，不使用 f2，不接第三方解析。
+- 页面遇到验证时由用户手动处理。
+- 媒体在当前专用浏览器会话存活期间下载到任务临时目录，不永久保存抖音视频；代码不读取或导出 Cookie。
 
-Agent 写入最终文件并确认文件存在且非空后，执行：
+这会降低静态 Cookie 重放导致的请求不匹配风险，但不能承诺平台绝对不会触发验证或风控。
 
-```bash
-<skill目录>/.venv/bin/python <skill目录>/scripts/complete.py \
-  --pending "<PENDING_FILE>" \
-  --final "<最终 Obsidian 文件绝对路径>"
+## 失败状态
+
+抖音失败会区分：
+
+```text
+BROWSER_NOT_READY
+BROWSER_LAUNCH_FAILED
+BROWSER_PAGE_LOAD_FAILED
+MANUAL_VERIFICATION_REQUIRED
+BROWSER_PAGE_BLOCKED
+BROWSER_MEDIA_NOT_FOUND
+MEDIA_DOWNLOAD_FAILED
+AUDIO_EXTRACTION_FAILED
+ASR_FAILED
 ```
 
-清理脚本只删除指定的一个 pending 文件，并只检查最终文件存在且非空。Agent 中断、写入失败或 Agent 自行的内容质量检查失败时，pending 文件必须保留；重试时直接读取它，不重新请求平台或重复 ASR。手动清理只应针对已经确认不再需要的单个文件，不要用通配符批量删除待处理内容。
+不再把失败统一提示为 `Fresh cookies are needed`，也不把重新导出 Cookie 作为默认修复方法。浏览器无法捕获媒体时，使用用户提供的本地视频作为兜底。
 
-## 目录路由
+## Pending 文件生命周期
 
-- 抖音：使用安装时配置的 `vault_dir`，默认建议为 `<vault>/I-抖音文案/`
-- 小红书：使用配置目录的同级 `<vault>/I-小红书文案/`
+pending 固定在：
 
-音频按来源链接缓存到 `~/.config/video-transcript/cache/`。pending 文件成功写入后，脚本清理本次音频缓存；下载、ASR 或 pending 写入失败时保留缓存，以便重试命中并减少平台请求。视频本身不永久落盘。
+```text
+~/.config/video-transcript/pending/
+```
 
-如果看到 `PermissionError: Operation not permitted` 并且错误路径指向 `~/.config/video-transcript/cookies.txt`，先确认使用的是最新安装副本并重试。这通常是旧版本把原始 Cookie 文件直接交给 `yt-dlp`，而沙箱禁止其写回；新版本会使用临时 Cookie 副本。只有出现明确的 cookie 过期或无效提示时，才需要在用户自己的终端重新运行 `scripts/setup-cookies.sh`。分享文案中的 Markdown 链接、反斜杠转义和附加文字由脚本自动规范化。
+其中包含完整原文、平台、标题、作者、来源、日期和时长。抖音媒体不进入 URL 缓存，因为它依赖当前浏览器页面会话。Agent 成功写入 Obsidian 后只删除对应的一个 pending 文件，不批量清理。
 
 ## 系统要求
 
-- macOS（Windows 适配计划中）
-- Python 3.9 或更高版本、git、Chrome
-- 已安装并配置 Obsidian，或提供任意本地目录作为笔记目录
+- macOS
+- Python 3.9 或更高版本、git
+- Obsidian，或任意本地笔记目录
+- 首次抖音使用需要在专用可见浏览器窗口中登录
 
-## 隐私与安全
+## 隐私
 
-- 只需一个硅基流动 API Key，保存在 `~/.config/video-transcript/.env`，权限为 `600`，不会进入对话记录或 Git
-- 抖音 cookie 保存在 `~/.config/video-transcript/cookies.txt`，权限为 `600`，不要提交到仓库
-- 脚本向硅基流动发送音频进行 ASR；pending 文件包含完整原文和来源元数据，暂存在本机配置目录
-- 纯自用工具，提取内容用于个人学习沉淀；请自行确认内容使用权限
+- 只需要硅基流动 API Key，保存在本机 `~/.config/video-transcript/.env`，权限 600。
+- 抖音登录状态只保存在本机专用浏览器 Profile，不导出为 `cookies.txt`。
+- 抖音音频由当前页面捕获后发送到硅基流动 SenseVoice 进行 ASR。
+- 不调用文本生成 API；摘要、要点、标签和最终文件由当前 Agent 处理。
+- 请自行确认内容使用权限。
 
 ## 手动安装
 
-见 [INSTALL.md](INSTALL.md)，按安装 SOP 执行。
+见 [INSTALL.md](INSTALL.md)。详细行为约束见 [SKILL.md](SKILL.md)。
+
+## 设计 Spec
+
+实现边界记录在 [抖音可见浏览器单条提取设计 Spec](docs/superpowers/specs/2026-09-08-douyin-browser-extraction-design.md)。
 
 ## License
 
