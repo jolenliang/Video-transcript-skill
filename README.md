@@ -19,7 +19,7 @@ Mac Agent 按需启动专用可见 Chromium
 页面自行处理登录、动态参数和安全验证
                 |
                 v
-捕获当前页面一个媒体源 -> 临时音频 -> SenseVoice ASR
+捕获当前页面的候选媒体流（DASH 音轨优先）-> 临时音频 -> SenseVoice ASR
                 |
                 v
 ~/.config/video-transcript/pending/<日期>-<标题>-<唯一后缀>.md
@@ -111,6 +111,8 @@ ASR_FAILED
 ```
 
 不再把失败统一提示为 `Fresh cookies are needed`，也不把重新导出 Cookie 作为默认修复方法。浏览器无法捕获媒体时，使用用户提供的本地视频作为兜底。
+
+抖音使用 DASH 分离传输，画面与音轨是两条独立流，且音轨流的 `Content-Type` 同样是 `video/mp4`。因此脚本按 URL 里的 `mime_type=audio_mp4`、`media-audio` 等语义判定音轨流；只捕获到画面流时会额外等待最多 12 秒，并保留最多 3 个候选媒体依次尝试抽音。`AUDIO_EXTRACTION_FAILED` 只有在所有候选都无音轨时才会出现。
 
 ## Pending 文件生命周期
 
