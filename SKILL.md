@@ -9,7 +9,7 @@ description: 提取文案、提取抖音视频口播文案、小红书笔记正�
 
 ## 平台流程
 
-- 抖音单条链接：按需启动专用可见 Playwright Chromium，使用独立持久化 Profile 打开链接，捕获当前页面的一个媒体源，提取音频后调用硅基流动 SenseVoice ASR。
+- 抖音单条链接：按需启动专用可见 Playwright Chromium，使用独立持久化 Profile 打开链接，捕获当前页面的媒体源（DASH 下画面与音轨是两条流，优先取独立音轨流；只捕到视频流时额外等 12 秒等音轨），提取音频后调用硅基流动 SenseVoice ASR。最多保留 3 个候选媒体，抽音失败时依次换下一个。
 - 小红书图文：使用 `yt-dlp` 读取正文，不需要抖音浏览器 Profile。
 - 小红书视频：使用现有 `yt-dlp` 音频流程，再调用 SenseVoice ASR。
 - 本地视频：使用 ffmpeg 提取音频，再调用 SenseVoice ASR。

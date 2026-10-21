@@ -431,15 +431,32 @@ def main():
                 if browser_result.status != MEDIA_STATUS_READY or not browser_result.media:
                     sys.exit(browser_failure_message(browser_result))
                 meta = browser_result.metadata
-                try:
-                    audio, media_meta = extract_audio_from_captured_media(
-                        browser_result.media,
-                        workdir,
-                        ffmpeg,
-                        already_downloaded=bool(browser_result.media.get("local_path")),
+                media_queue = [browser_result.media] + list(
+                    getattr(browser_result, "alternatives", None) or []
+                )
+                audio = None
+                media_meta = {}
+                last_error = None
+                for index, candidate in enumerate(media_queue, start=1):
+                    try:
+                        audio, media_meta = extract_audio_from_captured_media(
+                            candidate,
+                            workdir,
+                            ffmpeg,
+                            already_downloaded=bool(candidate.get("local_path")),
+                        )
+                        if index > 1:
+                            print(f"↩️ 已改用第 {index} 个候选媒体源", flush=True)
+                        break
+                    except Exception as error:
+                        last_error = error
+                        audio = None
+                        continue
+                if audio is None:
+                    sys.exit(
+                        f"❌ 抖音浏览器媒体处理失败 [AUDIO_EXTRACTION_FAILED]："
+                        f"尝试 {len(media_queue)} 个候选后仍无可用音频流（{last_error}）"
                     )
-                except Exception as error:
-                    sys.exit(f"❌ 抖音浏览器媒体处理失败 [AUDIO_EXTRACTION_FAILED]：{error}")
                 meta = {**meta, **{k: v for k, v in media_meta.items() if v}}
                 print(f"🎙 ASR 转写中（{audio.stat().st_size//1024}KB）...", flush=True)
                 transcript = asr(audio, env["SILICONFLOW_API_KEY"])

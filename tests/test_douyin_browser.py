@@ -103,6 +103,44 @@ class DouyinBrowserHelperTests(unittest.TestCase):
         self.assertEqual(audio["kind"], "audio")
         self.assertIsNone(image)
 
+    def test_normalize_detects_dash_audio_track_despite_video_content_type(self):
+        # 抖音 DASH 音轨流没有扩展名，Content-Type 也是 video/mp4，
+        # 只能靠 query 里的 mime_type 区分
+        audio = douyin_browser.normalize_media_candidate(
+            "https://v3-web.douyinvod.com/abc/video/tos/cn/tos-cn-ve-15/oQxxxx/"
+            "?a=6383&mime_type=audio_mp4&br=64000",
+            "video/mp4",
+            resource_type="media",
+        )
+        video = douyin_browser.normalize_media_candidate(
+            "https://v3-web.douyinvod.com/abc/video/tos/cn/tos-cn-ve-15/oQxxxx/"
+            "?a=6383&mime_type=video_mp4&br=2000000",
+            "video/mp4",
+            resource_type="media",
+        )
+
+        self.assertEqual(audio["kind"], "audio")
+        self.assertEqual(video["kind"], "video")
+
+    def test_select_media_candidates_keeps_audio_first_then_video(self):
+        result = douyin_browser.select_media_candidates(
+            [
+                {"url": "https://p.douyinvod.com/v1/?mime_type=video_mp4", "kind": "video"},
+                {"url": "https://p.douyinvod.com/a1/?mime_type=audio_mp4", "kind": "audio"},
+                {"url": "https://p.douyinvod.com/v2/?mime_type=video_mp4", "kind": "video"},
+            ]
+        )
+
+        self.assertEqual([item["kind"] for item in result], ["audio", "video", "video"])
+        self.assertEqual(
+            [item["url"] for item in result],
+            [
+                "https://p.douyinvod.com/a1/?mime_type=audio_mp4",
+                "https://p.douyinvod.com/v1/?mime_type=video_mp4",
+                "https://p.douyinvod.com/v2/?mime_type=video_mp4",
+            ],
+        )
+
 
 class FakeBodyLocator:
     def __init__(self, page):

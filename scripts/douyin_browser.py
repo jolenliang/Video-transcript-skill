@@ -39,6 +39,30 @@ _VERIFICATION_MARKERS = (
 _VIDEO_EXTENSIONS = (".mp4", ".m4v", ".webm", ".mov", ".m3u8", ".mpd")
 _AUDIO_EXTENSIONS = (".mp3", ".m4a", ".aac", ".wav", ".ogg", ".flac")
 
+# 抖音使用 DASH 分离传输：画面与声音是两条独立流，两条流的 URL 都没有
+# 文件扩展名，Content-Type 也常同为 video/mp4。query 里的 mime_type 与
+# path 里的 media-audio / media-video 才是可靠区分信号。
+_AUDIO_URL_MARKERS = (
+    "mime_type=audio",
+    "audio_mp4",
+    "media-audio",
+    "-audio-",
+    "audio-und",
+    "mp4a",
+)
+_VIDEO_URL_MARKERS = (
+    "mime_type=video",
+    "video_mp4",
+    "media-video",
+    "-video-",
+    "video-und",
+    "avc1",
+)
+
+# 只捕获到视频流时，额外等待独立音轨流出现的时间窗口
+AUDIO_WAIT_GRACE_SECONDS = 12.0
+MAX_MEDIA_ALTERNATIVES = 3
+
 
 def _loop_time() -> float:
     """Return monotonic loop time on both Python 3.6 and modern Python."""
@@ -53,6 +77,7 @@ class BrowserCaptureResult:
     status: str
     metadata: Dict[str, Any] = field(default_factory=dict)
     media: Optional[Dict[str, Any]] = None
+    alternatives: List[Dict[str, Any]] = field(default_factory=list)
     error: str = ""
 
 
@@ -74,6 +99,17 @@ def detect_page_status(text: str) -> Optional[str]:
     return None
 
 
+def _kind_from_url_hint(url: str) -> Optional[str]:
+    """Infer DASH stream kind from the URL itself (path plus query)."""
+    parsed = urlparse(str(url or ""))
+    blob = f"{parsed.path or ''} {parsed.query or ''}".lower()
+    if any(marker in blob for marker in _AUDIO_URL_MARKERS):
+        return "audio"
+    if any(marker in blob for marker in _VIDEO_URL_MARKERS):
+        return "video"
+    return None
+
+
 def normalize_media_candidate(
     url: str, content_type: str = "", resource_type: str = ""
 ) -> Optional[Dict[str, Any]]:
@@ -86,7 +122,11 @@ def normalize_media_candidate(
     path = (urlparse(url).path or "").lower()
     resource_type = str(resource_type or "").lower().strip()
 
-    if content_type.startswith("audio/") or path.endswith(_AUDIO_EXTENSIONS):
+    hint = _kind_from_url_hint(url)
+    if hint:
+        # URL 语义优先于 Content-Type：DASH 音轨流的 Content-Type 往往也是 video/mp4
+        kind = hint
+    elif content_type.startswith("audio/") or path.endswith(_AUDIO_EXTENSIONS):
         kind = "audio"
     elif content_type.startswith("video/") or path.endswith(_VIDEO_EXTENSIONS):
         kind = "video"
@@ -107,8 +147,14 @@ def normalize_media_candidate(
     }
 
 
-def select_media_candidate(candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Return one deduplicated candidate, preferring independent audio."""
+def select_media_candidates(
+    candidates: List[Dict[str, Any]], limit: int = MAX_MEDIA_ALTERNATIVES
+) -> List[Dict[str, Any]]:
+    """Return deduplicated candidates ordered by preference (independent audio first).
+
+    A single DASH page exposes several streams; keeping more than one lets the
+    caller retry when the first pick turns out to carry no audio track.
+    """
     unique = []
     seen = set()
     for candidate in candidates or []:
@@ -122,7 +168,15 @@ def select_media_candidate(candidates: List[Dict[str, Any]]) -> Optional[Dict[st
         seen.add(url)
         unique.append(candidate)
     unique.sort(key=lambda item: 0 if item.get("kind") == "audio" else 1)
-    return unique[0] if unique else None
+    if limit is None or limit <= 0:
+        return unique
+    return unique[:limit]
+
+
+def select_media_candidate(candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Return one deduplicated candidate, preferring independent audio."""
+    selected = select_media_candidates(candidates, limit=1)
+    return selected[0] if selected else None
 
 
 def _safe_error(error: Any) -> str:
@@ -243,6 +297,7 @@ async def _capture_with_playwright(
 
         deadline = _loop_time() + max(wait_timeout_ms, 0) / 1000
         verification_reported = False
+        video_only_since = None
         while True:
             try:
                 body_text = await page.locator("body").inner_text(timeout=2000)
@@ -258,8 +313,23 @@ async def _capture_with_playwright(
             else:
                 verification_reported = False
 
-            if candidates:
+            # 不能一拿到视频流就跳出：DASH 下音轨是另一条响应，
+            # 过早退出会只留下无音轨的视频流，后续 ffmpeg 抽音必然失败。
+            has_audio_candidate = any(
+                candidate.get("kind") == "audio" for candidate in candidates
+            )
+            if has_audio_candidate:
                 break
+            if candidates:
+                if video_only_since is None:
+                    video_only_since = _loop_time()
+                elif _loop_time() - video_only_since >= AUDIO_WAIT_GRACE_SECONDS:
+                    print(
+                        "BROWSER_STATUS=VIDEO_ONLY（未等到独立音轨流，改用视频流兜底）",
+                        flush=True,
+                    )
+                    break
+
             try:
                 current_srcs = await page.eval_on_selector_all(
                     "video",
@@ -292,32 +362,46 @@ async def _capture_with_playwright(
         except Exception:
             page_meta = {}
 
-        selected = select_media_candidate(candidates)
+        selected_list = select_media_candidates(candidates)
         metadata = _default_metadata(
             url,
             (page_meta.get("title") if isinstance(page_meta, dict) else "") or page_title,
             page_meta.get("author", "") if isinstance(page_meta, dict) else "",
             page_meta.get("duration", 0) if isinstance(page_meta, dict) else 0,
         )
-        if selected:
-            selected = {
-                **selected,
-                "user_agent": await page.evaluate("() => navigator.userAgent"),
-                "referer": DOUYIN_REFERER,
-            }
-            if media_output_dir is not None:
-                media_output_dir = Path(media_output_dir).expanduser()
-                media_output_dir.mkdir(parents=True, exist_ok=True)
-                suffix = ".m4a" if selected["kind"] == "audio" else ".mp4"
-                local_path = media_output_dir / ("captured" + suffix)
-                if not await _download_in_browser_context(context, selected["url"], local_path):
-                    return BrowserCaptureResult(
-                        MEDIA_STATUS_MEDIA_DOWNLOAD_FAILED,
-                        metadata=metadata,
-                        error="浏览器会话内下载捕获的媒体失败",
-                    )
-                selected["local_path"] = str(local_path)
-            return BrowserCaptureResult(MEDIA_STATUS_READY, metadata=metadata, media=selected)
+        if selected_list:
+            user_agent = await page.evaluate("() => navigator.userAgent")
+            media_items = []
+            for index, candidate in enumerate(selected_list):
+                item = {
+                    **candidate,
+                    "user_agent": user_agent,
+                    "referer": DOUYIN_REFERER,
+                }
+                if media_output_dir is not None:
+                    media_output_dir = Path(media_output_dir).expanduser()
+                    media_output_dir.mkdir(parents=True, exist_ok=True)
+                    stem = "captured" if index == 0 else f"captured-alt{index}"
+                    suffix = ".m4a" if item["kind"] == "audio" else ".mp4"
+                    local_path = media_output_dir / (stem + suffix)
+                    if not await _download_in_browser_context(
+                        context, item["url"], local_path
+                    ):
+                        continue
+                    item["local_path"] = str(local_path)
+                media_items.append(item)
+            if not media_items:
+                return BrowserCaptureResult(
+                    MEDIA_STATUS_MEDIA_DOWNLOAD_FAILED,
+                    metadata=metadata,
+                    error="浏览器会话内下载捕获的媒体失败",
+                )
+            return BrowserCaptureResult(
+                MEDIA_STATUS_READY,
+                metadata=metadata,
+                media=media_items[0],
+                alternatives=media_items[1:],
+            )
         if page_load_error:
             return BrowserCaptureResult(
                 MEDIA_STATUS_BROWSER_PAGE_LOAD_FAILED,
