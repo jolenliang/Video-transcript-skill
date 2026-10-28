@@ -147,6 +147,8 @@ pending 固定在：
 
 实现边界记录在 [抖音可见浏览器单条提取设计 Spec](docs/superpowers/specs/2026-09-08-douyin-browser-extraction-design.md)。
 
+维护者视角的项目说明、目录结构、依赖版本与已知坑见 [PROJECT.md](docs/PROJECT.md)。
+
 ## License
 
 MIT
